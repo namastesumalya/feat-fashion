@@ -417,10 +417,36 @@ export default function App() {
       }
 
       const urlOrderId = params.get('id') || params.get('orderId');
-      if (urlOrderId && orders.length > 0) {
-        const foundOrder = orders.find(o => o.id === urlOrderId);
+      const orderSuccessId = params.get('order_success');
+      const targetOrderId = orderSuccessId || urlOrderId;
+
+      if (orderSuccessId) {
+        setCart([]);
+        setAppliedPromos([]);
+        try {
+          localStorage.removeItem('feat_active_pending_order_id');
+          localStorage.removeItem('feat_active_pending_order_time');
+          localStorage.removeItem('feat_cart_items_v2');
+          localStorage.removeItem('feat_cart_items');
+        } catch (e) {}
+      }
+
+      if (targetOrderId) {
+        const foundOrder = orders.find(o => o.id === targetOrderId);
         if (foundOrder) {
           setSelectedOrderForDetails(foundOrder);
+          if (orderSuccessId) setCurrentPath('order-details');
+        } else {
+          fetch(`/api/orders/${encodeURIComponent(targetOrderId)}`)
+            .then(res => res.json())
+            .then(data => {
+              if (data && data.order) {
+                setSelectedOrderForDetails(data.order);
+                setOrders(prev => [data.order, ...prev.filter(o => o.id !== data.order.id)]);
+                if (orderSuccessId) setCurrentPath('order-details');
+              }
+            })
+            .catch(() => {});
         }
       }
     };
@@ -1510,6 +1536,12 @@ export default function App() {
 
     setCart([]);
     setAppliedPromos([]);
+    try {
+      localStorage.removeItem('feat_active_pending_order_id');
+      localStorage.removeItem('feat_active_pending_order_time');
+      localStorage.removeItem('feat_cart_items_v2');
+      localStorage.removeItem('feat_cart_items');
+    } catch (e) {}
     return newOrder;
   };
 

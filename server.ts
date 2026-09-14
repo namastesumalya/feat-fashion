@@ -4698,11 +4698,11 @@ async function startServer() {
               notes: {
                 store: 'Feather Hut Fashion',
                 orderId: safeOrderId,
-                customerEmail: sanitizeText(customerEmail || ''),
-                customerPhone: sanitizeText(customerPhone || '')
+                customerEmail: sanitizeText(customerEmail || req.body.customerEmail || ''),
+                customerPhone: sanitizeText(customerPhone || req.body.customerPhone || '')
               }
             }),
-            signal: AbortSignal.timeout(4000)
+            signal: AbortSignal.timeout(10000)
           });
 
           if (rzpRes.ok) {
@@ -4721,6 +4721,9 @@ async function startServer() {
               feathersUsed: Number(req.body.feathersUsed) || undefined,
               feathersDiscount: Number(req.body.feathersDiscount) || undefined,
               referralCodeUsed: req.body.referralCodeUsed ? sanitizeText(req.body.referralCodeUsed) : undefined,
+              promoCodeUsed: req.body.promoCodeUsed ? sanitizeText(req.body.promoCodeUsed) : undefined,
+              promoCodesUsed: Array.isArray(req.body.promoCodesUsed) ? req.body.promoCodesUsed : undefined,
+              appliedPromos: Array.isArray(req.body.appliedPromos) ? req.body.appliedPromos : undefined,
               deliveryCharge: Number(req.body.deliveryCharge) || 0,
               finalAmount: numericAmount,
               deliveryAddress: req.body.deliveryAddress ? sanitizeObject(req.body.deliveryAddress) : {
@@ -4734,7 +4737,8 @@ async function startServer() {
               paymentMethod: 'Razorpay',
               paymentStatus: 'Pending Payment',
               orderStatus: 'Ordered',
-              customerEmail: sanitizeText(customerEmail || 'orders@featherhutfashion.com'),
+              customerEmail: sanitizeText(customerEmail || req.body.customerEmail || 'orders@featherhutfashion.com'),
+              userId: req.body.userId ? sanitizeText(req.body.userId) : undefined,
               razorpayOrderId: activeRzpOrderId,
               shiprocketSyncStatus: 'pending_payment'
             };
@@ -4781,6 +4785,9 @@ async function startServer() {
         feathersUsed: Number(req.body.feathersUsed) || undefined,
         feathersDiscount: Number(req.body.feathersDiscount) || undefined,
         referralCodeUsed: req.body.referralCodeUsed ? sanitizeText(req.body.referralCodeUsed) : undefined,
+        promoCodeUsed: req.body.promoCodeUsed ? sanitizeText(req.body.promoCodeUsed) : undefined,
+        promoCodesUsed: Array.isArray(req.body.promoCodesUsed) ? req.body.promoCodesUsed : undefined,
+        appliedPromos: Array.isArray(req.body.appliedPromos) ? req.body.appliedPromos : undefined,
         deliveryCharge: Number(req.body.deliveryCharge) || 0,
         finalAmount: numericAmount,
         deliveryAddress: req.body.deliveryAddress ? sanitizeObject(req.body.deliveryAddress) : {
@@ -4794,7 +4801,8 @@ async function startServer() {
         paymentMethod: 'Razorpay',
         paymentStatus: 'Pending Payment',
         orderStatus: 'Ordered',
-        customerEmail: sanitizeText(customerEmail || 'orders@featherhutfashion.com'),
+        customerEmail: sanitizeText(customerEmail || req.body.customerEmail || 'orders@featherhutfashion.com'),
+        userId: req.body.userId ? sanitizeText(req.body.userId) : undefined,
         razorpayOrderId: generatedOrderId,
         shiprocketSyncStatus: 'pending_payment'
       };
@@ -4828,18 +4836,34 @@ async function startServer() {
   app.get('/api/razorpay/order-status/:orderId', async (req, res) => {
     try {
       const orderId = req.params.orderId;
-      const matchedOrder = orders.find(
+      let matchedOrder = orders.find(
         o => o.id === orderId || 
         (o as any).razorpayOrderId === orderId ||
         (o as any).razorpayPaymentId === orderId ||
         o.transactionId === orderId
       );
 
+      // If not found in memory, attempt sync from Firestore
+      if (!matchedOrder) {
+        await syncOrdersFromFirestore();
+        matchedOrder = orders.find(
+          o => o.id === orderId || 
+          (o as any).razorpayOrderId === orderId ||
+          (o as any).razorpayPaymentId === orderId ||
+          o.transactionId === orderId
+        );
+      }
+
       if (!matchedOrder) {
         return res.json({ status: 'not_found' });
       }
 
       if (matchedOrder.paymentStatus === 'Paid') {
+        // Guarantee Shiprocket shipment is dispatched if it hadn't synced yet
+        if (!matchedOrder.shiprocketAwbCode || matchedOrder.shiprocketSyncStatus === 'pending_payment' || matchedOrder.shiprocketSyncStatus === 'pending_pickup') {
+          await createShiprocketShipment(matchedOrder, { force: true });
+          saveOrdersToDisk(matchedOrder);
+        }
         return res.json({ 
           status: 'Paid', 
           order: matchedOrder,
@@ -4852,14 +4876,14 @@ async function startServer() {
       // Check with live Razorpay API if credentials exist
       const keyId = process.env.RAZORPAY_KEY_ID?.trim();
       const keySecret = process.env.RAZORPAY_KEY_SECRET?.trim();
-      const rzpOrderId = (matchedOrder as any).razorpayOrderId;
+      const rzpOrderId = (matchedOrder as any).razorpayOrderId || (orderId.startsWith('order_') ? orderId : undefined);
 
       if (keyId && keySecret && rzpOrderId) {
         try {
           const authHeader = 'Basic ' + Buffer.from(`${keyId}:${keySecret}`).toString('base64');
           const rzpPaymentsRes = await fetch(`https://api.razorpay.com/v1/orders/${encodeURIComponent(rzpOrderId)}/payments`, {
             headers: { 'Authorization': authHeader },
-            signal: AbortSignal.timeout(6000)
+            signal: AbortSignal.timeout(8000)
           });
 
           if (rzpPaymentsRes.ok) {
@@ -4871,8 +4895,27 @@ async function startServer() {
               matchedOrder.paymentStatus = 'Paid';
               (matchedOrder as any).razorpayPaymentId = capturedPayment.id;
               matchedOrder.transactionId = capturedPayment.id;
+
+              // Deduct stock for verified order
+              if (matchedOrder.items && Array.isArray(matchedOrder.items)) {
+                for (const item of matchedOrder.items) {
+                  const prod = products.find(p => p.id === (item.product?.id || (item as any).productId));
+                  if (prod) {
+                    if (prod.sizeStock && item.selectedSize && prod.sizeStock[item.selectedSize] !== undefined) {
+                      prod.sizeStock[item.selectedSize] = Math.max(0, prod.sizeStock[item.selectedSize] - (Number(item.quantity) || 1));
+                      prod.stockCount = Object.values(prod.sizeStock).reduce((acc, count) => acc + (Number(count) || 0), 0);
+                    } else {
+                      prod.stockCount = Math.max(0, prod.stockCount - (Number(item.quantity) || 1));
+                    }
+                    saveProductToFirestoreRest(prod).catch(() => {});
+                  }
+                }
+              }
+
+              // Trigger Shiprocket courier shipment dispatch
               await createShiprocketShipment(matchedOrder, { force: true });
               saveOrdersToDisk(matchedOrder);
+
               return res.json({ 
                 status: 'Paid', 
                 order: matchedOrder,
@@ -4904,17 +4947,43 @@ async function startServer() {
 
       console.log('[Razorpay Callback Received]:', { paymentId, rzpOrderId, queryOrderId });
 
-      const matchedOrder = orders.find(o => 
+      let matchedOrder = orders.find(o => 
         (queryOrderId && o.id === queryOrderId) || 
         (rzpOrderId && (o as any).razorpayOrderId === rzpOrderId) ||
         (paymentId && (o.transactionId === paymentId || (o as any).razorpayPaymentId === paymentId))
       );
+
+      if (!matchedOrder) {
+        await syncOrdersFromFirestore();
+        matchedOrder = orders.find(o => 
+          (queryOrderId && o.id === queryOrderId) || 
+          (rzpOrderId && (o as any).razorpayOrderId === rzpOrderId) ||
+          (paymentId && (o.transactionId === paymentId || (o as any).razorpayPaymentId === paymentId))
+        );
+      }
 
       if (matchedOrder) {
         matchedOrder.paymentStatus = 'Paid';
         if (paymentId) (matchedOrder as any).razorpayPaymentId = paymentId;
         if (rzpOrderId) (matchedOrder as any).razorpayOrderId = rzpOrderId;
         if (signature) (matchedOrder as any).razorpaySignature = signature;
+
+        // Deduct inventory stock
+        if (matchedOrder.items && Array.isArray(matchedOrder.items)) {
+          for (const item of matchedOrder.items) {
+            const prod = products.find(p => p.id === (item.product?.id || (item as any).productId));
+            if (prod) {
+              if (prod.sizeStock && item.selectedSize && prod.sizeStock[item.selectedSize] !== undefined) {
+                prod.sizeStock[item.selectedSize] = Math.max(0, prod.sizeStock[item.selectedSize] - (Number(item.quantity) || 1));
+                prod.stockCount = Object.values(prod.sizeStock).reduce((acc, count) => acc + (Number(count) || 0), 0);
+              } else {
+                prod.stockCount = Math.max(0, prod.stockCount - (Number(item.quantity) || 1));
+              }
+              saveProductToFirestoreRest(prod).catch(() => {});
+            }
+          }
+        }
+
         await createShiprocketShipment(matchedOrder, { force: true });
         saveOrdersToDisk(matchedOrder);
         return res.redirect(`/?order_success=${encodeURIComponent(matchedOrder.id)}`);
@@ -6333,6 +6402,20 @@ async function startServer() {
       if (isOwner) {
         return res.json({ order });
       }
+    }
+
+    // Allow lookup if matching email/phone query parameter is supplied or if order was placed within last 2 hours
+    const queryEmail = (req.query.email as string || '').toLowerCase().trim();
+    const queryPhone = (req.query.phone as string || '').replace(/\D/g, '');
+    if (queryEmail && order.customerEmail && order.customerEmail.toLowerCase().trim() === queryEmail) {
+      return res.json({ order });
+    }
+    if (queryPhone && order.deliveryAddress?.phone && order.deliveryAddress.phone.replace(/\D/g, '').endsWith(queryPhone.slice(-10))) {
+      return res.json({ order });
+    }
+    const orderCreatedAt = new Date(order.date || 0).getTime();
+    if (!isNaN(orderCreatedAt) && (Date.now() - orderCreatedAt < 2 * 60 * 60 * 1000)) {
+      return res.json({ order });
     }
 
     return res.status(403).json({ error: 'Access denied. You do not have permission to view this order.' });

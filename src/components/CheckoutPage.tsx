@@ -133,6 +133,9 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({
   const activeOrderRef = useRef<string>('');
   const [isVerifyingPayment, setIsVerifyingPayment] = useState(false);
   const isPollingRef = useRef<boolean>(false);
+  const pollTimerRef = useRef<any>(null);
+  const pollCountdownRef = useRef<number>(45);
+  const [verificationCountdown, setVerificationCountdown] = useState<number>(45);
   const [isPlacingCod, setIsPlacingCod] = useState(false);
 
   // Sync with current user profile changes
@@ -167,6 +170,14 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({
     timestamp: string;
   } | null>(null);
 
+  const stopPolling = () => {
+    if (pollTimerRef.current) {
+      clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+    isPollingRef.current = false;
+  };
+
   // Query server order payment status (Crucial for mobile users switching from Google Pay / PhonePe / UPI)
   const verifyOrderPayment = async (orderIdToCheck: string): Promise<boolean> => {
     if (!orderIdToCheck) return false;
@@ -176,11 +187,16 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({
         const data = await res.json();
         if (data.status === 'Paid') {
           console.info('[Mobile Payment Verification] Order confirmed PAID:', data);
+          stopPolling();
           setIsPaymentSessionActive(false);
           setIsRazorpayLoading(false);
           setPaymentFailureDetails(null);
           setIsVerifyingPayment(false);
-          isPollingRef.current = false;
+
+          try {
+            localStorage.removeItem('feat_active_pending_order_id');
+            localStorage.removeItem('feat_active_pending_order_time');
+          } catch (e) {}
           
           await processOrder(data.order?.transactionId || data.order?.razorpayPaymentId || `RZP_${Date.now()}`, {
             razorpayOrderId: data.order?.razorpayOrderId,
@@ -196,12 +212,80 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({
     return false;
   };
 
+  const startVerificationPolling = (orderIdToPoll: string) => {
+    if (!orderIdToPoll) return;
+    stopPolling();
+    isPollingRef.current = true;
+    setIsVerifyingPayment(true);
+    setPaymentFailureDetails(null);
+    pollCountdownRef.current = 45;
+    setVerificationCountdown(45);
+
+    // Immediate check
+    verifyOrderPayment(orderIdToPoll);
+
+    pollTimerRef.current = setInterval(async () => {
+      pollCountdownRef.current -= 2;
+      setVerificationCountdown(Math.max(0, pollCountdownRef.current));
+
+      const isPaid = await verifyOrderPayment(orderIdToPoll);
+      if (isPaid) {
+        stopPolling();
+        return;
+      }
+
+      if (pollCountdownRef.current <= 0) {
+        stopPolling();
+        setIsVerifyingPayment(false);
+        setIsPaymentSessionActive(false);
+        setIsRazorpayLoading(false);
+        setPaymentFailureDetails({
+          title: 'Payment Confirmation In Progress',
+          description: 'We did not receive instant confirmation from your UPI app or bank yet.',
+          reason: 'UPI payments can take up to 1-2 minutes to settle between your bank and the payment gateway. If money was debited from your bank account, please click "I Already Paid / Verify Status" below.',
+          code: 'UPI_AWAITING_SETTLEMENT',
+          source: 'gateway',
+          step: 'payment_authorization',
+          actionAdvice: 'Click "I Already Paid / Verify Status" to re-check immediately, or you can switch to Cash on Delivery below.',
+          timestamp: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+        });
+      }
+    }, 2000);
+  };
+
+  // Re-check payment status on mount if a recent order was initiated on mobile
+  useEffect(() => {
+    try {
+      const savedPendingId = localStorage.getItem('feat_active_pending_order_id');
+      const savedPendingTime = localStorage.getItem('feat_active_pending_order_time');
+      if (savedPendingId && savedPendingTime) {
+        const elapsedMinutes = (Date.now() - Number(savedPendingTime)) / (1000 * 60);
+        if (elapsedMinutes < 20) {
+          activeOrderRef.current = savedPendingId;
+          startVerificationPolling(savedPendingId);
+        } else {
+          localStorage.removeItem('feat_active_pending_order_id');
+          localStorage.removeItem('feat_active_pending_order_time');
+        }
+      }
+    } catch (e) {}
+
+    return () => {
+      stopPolling();
+    };
+  }, []);
+
   // Re-check payment status when mobile user switches back to browser tab from UPI app
   useEffect(() => {
     const handleVisibilityOrFocus = async () => {
-      if (document.visibilityState === 'visible' && activeOrderRef.current && (isPaymentSessionActive || isVerifyingPayment || paymentFailureDetails)) {
-        console.info('[Mobile Checkout] Regained browser focus. Checking UPI status for:', activeOrderRef.current);
-        await verifyOrderPayment(activeOrderRef.current);
+      const targetId = activeOrderRef.current || localStorage.getItem('feat_active_pending_order_id');
+      if (document.visibilityState === 'visible' && targetId && step !== 'success') {
+        console.info('[Mobile Checkout] Regained browser focus. Checking UPI status for:', targetId);
+        if (!isPollingRef.current) {
+          startVerificationPolling(targetId);
+        } else {
+          await verifyOrderPayment(targetId);
+        }
       }
     };
 
@@ -212,7 +296,7 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({
       document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
       window.removeEventListener('focus', handleVisibilityOrFocus);
     };
-  }, [isPaymentSessionActive, isVerifyingPayment, paymentFailureDetails]);
+  }, [step]);
 
   // Ticking effect for active payment session
   useEffect(() => {
@@ -695,8 +779,11 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({
     try {
       localStorage.setItem('feat_saved_delivery_address', JSON.stringify(address));
       localStorage.setItem('feat_saved_customer_email', customerEmail);
+      localStorage.setItem('feat_active_pending_order_id', orderRef);
+      localStorage.setItem('feat_active_pending_order_time', String(Date.now()));
     } catch (err) {}
 
+    activeOrderRef.current = orderRef;
     setIsRazorpayLoading(true);
     setIsPaymentSessionActive(true);
     setPaymentSessionSeconds(0);
@@ -733,9 +820,19 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({
             orderId: orderRef,
             customerEmail,
             customerPhone: address.phone,
+            deliveryAddress: address,
+            totalMrp,
+            discountAmount: totalDiscount,
+            couponDiscount,
+            prepaidDiscount,
+            promoCodeUsed: effectiveAppliedPromos.map(p => p.code).join(', ') || undefined,
+            promoCodesUsed: effectiveAppliedPromos.map(p => p.code),
+            appliedPromos: effectiveAppliedPromos,
+            deliveryCharge: 0,
+            userId: currentUser?.uid,
             items: cartItems
           }),
-          signal: AbortSignal.timeout(6000)
+          signal: AbortSignal.timeout(15000)
         });
         const rzpData = await rzpRes.json();
         if (!rzpRes.ok) {
@@ -768,11 +865,18 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({
         description: `Order ${orderRef} • Authentic Indian Ethnic Wear`,
         image: (typeof window !== 'undefined' ? window.location.origin : '') + '/saree.jpeg',
         order_id: activeRzpOrderId || undefined,
+        callback_url: `${typeof window !== 'undefined' ? window.location.origin : ''}/api/razorpay/callback?orderId=${encodeURIComponent(orderRef)}`,
+        redirect: false,
         handler: async function (response: any) {
-          const elapsed = paymentSessionSeconds;
+          stopPolling();
           setIsPaymentSessionActive(false);
           setIsRazorpayLoading(false);
           setPaymentFailureDetails(null);
+          setIsVerifyingPayment(false);
+          try {
+            localStorage.removeItem('feat_active_pending_order_id');
+            localStorage.removeItem('feat_active_pending_order_time');
+          } catch (e) {}
           console.info('Razorpay payment authorization success:', response);
 
           await processOrder(response.razorpay_payment_id || `RZP_${Date.now()}`, {
@@ -797,39 +901,18 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({
         },
         modal: {
           ondismiss: function () {
-            const elapsed = paymentSessionSeconds;
-            setIsPaymentSessionActive(false);
-            setIsRazorpayLoading(false);
-
-            logFailedPayment({
-              status: 'cancelled',
-              errorCode: 'POPUP_DISMISSED',
-              errorReason: elapsed >= 30 
-                ? `Customer closed payment modal after ${elapsed}s wait. Latency or bank authorization delay likely.`
-                : 'Customer closed Razorpay popup without authorizing payment.',
-              errorDescription: 'Transaction was cancelled by user dismissing the checkout gateway modal.',
-              errorSource: 'customer',
-              errorStep: 'payment_authorization',
-              elapsedSeconds: elapsed,
-              actionAdvice: 'You can retry with instant UPI / Net Banking, or switch to Cash on Delivery for instant confirmation.'
-            });
-
-            setPaymentFailureDetails({
-              title: 'Payment Incomplete',
-              description: 'The Razorpay payment window was closed before your transaction was authorized.',
-              reason: 'No money has been debited. If your bank server timed out or you prefer not to enter card details, you can place your order via Cash on Delivery with zero extra charges.',
-              code: 'POPUP_CLOSED',
-              source: 'customer',
-              step: 'payment_authorization',
-              actionAdvice: 'Click "Retry Payment" to relaunch Razorpay or select "Place COD Order" below.',
-              timestamp: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-            });
+            console.info('[Checkout] Razorpay modal dismissed or backgrounded. Triggering verification polling for:', orderRef);
+            // On mobile devices, switching to UPI apps (GPay, PhonePe, Paytm) often triggers ondismiss
+            // while the payment is actively processing. Start polling instead of declaring failure.
+            startVerificationPolling(orderRef);
           }
         }
       };
 
       const rzp = new (window as any).Razorpay(options);
       rzp.on('payment.failed', function (resp: any) {
+        stopPolling();
+        setIsVerifyingPayment(false);
         const elapsed = paymentSessionSeconds;
         setIsPaymentSessionActive(false);
         setIsRazorpayLoading(false);
@@ -1764,8 +1847,55 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({
               </div>
             )}
 
+            {/* Mobile UPI / Bank Verification Banner */}
+            {isVerifyingPayment && (
+              <div className="p-4 rounded-2xl bg-gradient-to-r from-emerald-50 via-teal-50 to-pink-50 border border-emerald-300 space-y-3 shadow-md animate-in fade-in duration-200">
+                <div className="flex items-start gap-3">
+                  <div className="p-2 rounded-xl bg-emerald-100 text-emerald-800 shrink-0">
+                    <Hourglass className="w-5 h-5 animate-spin text-emerald-700" />
+                  </div>
+                  <div className="space-y-1 flex-1">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-xs font-black text-emerald-950 uppercase tracking-wider">
+                        Verifying Payment Status with UPI / Bank...
+                      </h4>
+                      <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-md bg-emerald-200 text-emerald-900 flex items-center gap-1">
+                        <Timer className="w-3 h-3" />
+                        {verificationCountdown}s
+                      </span>
+                    </div>
+                    <p className="text-xs text-emerald-900 leading-relaxed">
+                      Please wait a moment while we receive instant confirmation from your bank or UPI app (Google Pay, PhonePe, Paytm, etc.).
+                    </p>
+                  </div>
+                </div>
+
+                <div className="w-full bg-emerald-200/80 rounded-full h-1.5 overflow-hidden">
+                  <div 
+                    className="h-full bg-emerald-600 transition-all duration-1000 ease-out"
+                    style={{ width: `${Math.min(100, Math.max(10, Math.round(((45 - verificationCountdown) / 45) * 100)))}%` }}
+                  />
+                </div>
+
+                <div className="flex items-center justify-between pt-1 text-[11px]">
+                  <span className="text-emerald-800 font-medium">Do not refresh this screen</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const idToVerify = activeOrderRef.current || localStorage.getItem('feat_active_pending_order_id') || orderRef;
+                      verifyOrderPayment(idToVerify);
+                    }}
+                    className="text-emerald-900 font-bold hover:underline cursor-pointer flex items-center gap-1"
+                  >
+                    <RefreshCw className="w-3 h-3 animate-spin" />
+                    <span>Check Now</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* Error & Diagnostic Banner if previous attempt failed */}
-            {paymentFailureDetails && !isPaymentSessionActive && (
+            {paymentFailureDetails && !isPaymentSessionActive && !isVerifyingPayment && (
               <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 space-y-2.5">
                 <div className="flex items-start gap-2.5">
                   <AlertCircle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
@@ -1784,7 +1914,18 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2 pt-1">
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const idToVerify = activeOrderRef.current || localStorage.getItem('feat_active_pending_order_id') || orderRef;
+                      startVerificationPolling(idToVerify);
+                    }}
+                    className="bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold px-4 py-2 rounded-xl transition-colors cursor-pointer flex items-center gap-1.5 shadow-xs"
+                  >
+                    <CheckCircle className="w-3.5 h-3.5" />
+                    <span>I Already Paid / Verify Status</span>
+                  </button>
                   <button
                     type="button"
                     onClick={handleOpenRazorpayModal}
@@ -1968,8 +2109,9 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({
             ) : (
               <button
                 type="button"
-                disabled={cartItems.length === 0}
+                disabled={cartItems.length === 0 || isPlacingCod}
                 onClick={async () => {
+                  if (isPlacingCod) return;
                   if (!agreeTerms) {
                     showAlert('Please accept the Terms & Conditions and Refund Policy to proceed.', 'warning', 'Policy Acceptance Required');
                     return;
@@ -1979,12 +2121,21 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({
                     showAlert('Please fill in and save your complete delivery and contact details first.', 'warning', 'Address Required');
                     return;
                   }
-                  await processOrder('COD_' + Date.now());
+                  setIsPlacingCod(true);
+                  try {
+                    await processOrder('COD_' + Date.now());
+                  } finally {
+                    setIsPlacingCod(false);
+                  }
                 }}
-                className="w-full bg-gradient-to-r from-emerald-700 via-teal-800 to-emerald-900 hover:from-emerald-800 hover:to-teal-900 text-amber-200 font-black py-4 px-6 rounded-2xl text-sm sm:text-base shadow-xl transition-all flex items-center justify-center gap-2 border border-emerald-400 active:scale-98 cursor-pointer"
+                className="w-full bg-gradient-to-r from-emerald-700 via-teal-800 to-emerald-900 hover:from-emerald-800 hover:to-teal-900 text-amber-200 font-black py-4 px-6 rounded-2xl text-sm sm:text-base shadow-xl transition-all flex items-center justify-center gap-2 border border-emerald-400 active:scale-98 cursor-pointer disabled:opacity-60"
               >
-                <Banknote className="w-5 h-5 text-amber-300 shrink-0" />
-                <span>Confirm Cash on Delivery Order (₹{finalPayable.toLocaleString('en-IN')})</span>
+                {isPlacingCod ? (
+                  <div className="w-5 h-5 border-2 border-amber-200 border-t-transparent rounded-full animate-spin shrink-0" />
+                ) : (
+                  <Banknote className="w-5 h-5 text-amber-300 shrink-0" />
+                )}
+                <span>{isPlacingCod ? 'Placing Order...' : `Confirm Cash on Delivery Order (₹${finalPayable.toLocaleString('en-IN')})`}</span>
               </button>
             )}
 
