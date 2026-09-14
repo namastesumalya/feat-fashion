@@ -1,0 +1,145 @@
+rules_version = '2';
+
+// ============================================================================
+// FEATHER HUT FASHION (FEAT) - USER SIDE FIRESTORE SECURITY RULES
+// FILE: firestore.user.rules
+// Dedicated Access Controls and Data Privacy Rules for Customers and Guests
+// ============================================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ------------------------------------------------------------------------
+    // SECTION 1: AUTHENTICATION & OWNERSHIP HELPER FUNCTIONS
+    // ------------------------------------------------------------------------
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Check if the authenticated user is the owner of the user profile document
+    function isUser(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Check if authenticated user owns the document via userId / uid field
+    function isDocOwner() {
+      return isAuthenticated() && (
+        (resource != null && resource.data.userId == request.auth.uid) ||
+        (resource != null && resource.data.uid == request.auth.uid)
+      );
+    }
+
+    // Check if order belongs to the customer by UID or verified email
+    function isOrderOwner() {
+      return isAuthenticated() && (
+        (resource != null && resource.data.userId == request.auth.uid) ||
+        (resource != null && resource.data.customerEmail == request.auth.token.email) ||
+        (resource != null && resource.data.email == request.auth.token.email)
+      );
+    }
+
+    // Basic order payload integrity verification
+    function isValidOrderCreate() {
+      return request.resource.data.items is list && 
+             request.resource.data.items.size() > 0 &&
+             request.resource.data.finalAmount >= 0;
+    }
+
+    // ------------------------------------------------------------------------
+    // SECTION 2: USER PROFILES & SAVED ADDRESSES
+    // ------------------------------------------------------------------------
+    
+    match /users/{userId} {
+      // User can read their own profile and saved address list
+      allow read: if isUser(userId);
+      
+      // User can create their own profile; prevent granting admin role
+      allow create: if isUser(userId) && (
+        !('role' in request.resource.data) || 
+        request.resource.data.role == 'customer'
+      );
+      
+      // User can update their own personal info and saved delivery addresses
+      allow update: if isUser(userId) && (
+        !('role' in request.resource.data) || 
+        request.resource.data.role == resource.data.role
+      );
+      
+      // User can delete their own profile
+      allow delete: if isUser(userId);
+    }
+
+    // ------------------------------------------------------------------------
+    // SECTION 3: PUBLIC STOREFRONT & CATALOG BROWSING
+    // ------------------------------------------------------------------------
+    
+    // Products Collection (Public Read-Only)
+    match /products/{productId} {
+      allow read: if true;
+      allow write: if false; // Users cannot modify product catalog
+    }
+
+    // Categories & Collections (Public Read-Only)
+    match /categories/{categoryId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Banners & Promos (Public Read-Only)
+    match /banners/{bannerId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Coupons (Public Read to validate promo codes at checkout)
+    match /coupons/{couponId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Store Settings (Public Read)
+    match /settings/{settingId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // ------------------------------------------------------------------------
+    // SECTION 4: USER ORDERS & CHECKOUT
+    // ------------------------------------------------------------------------
+    
+    match /orders/{orderId} {
+      // Authenticated users can only read their own orders
+      allow read: if isOrderOwner();
+      
+      // Allow customers to place an order with valid order payload
+      allow create: if isValidOrderCreate();
+      
+      // Customers cannot tamper with confirmed order status, refunds, or payment state
+      allow update, delete: if false;
+    }
+
+    // ------------------------------------------------------------------------
+    // SECTION 5: CUSTOMER REVIEWS, CONTACTS & CART/WISHLIST SYNC
+    // ------------------------------------------------------------------------
+    
+    // Product Reviews
+    match /reviews/{reviewId} {
+      allow read: if true;
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+    }
+
+    // Contact Form Submissions
+    match /contacts/{contactId} {
+      allow create: if true;
+      allow read, update, delete: if false; // Inquiries are private to store staff
+    }
+
+    // Payment Failure Telemetry (Allows users to report gateway issues for debugging)
+    match /payment_failures/{failureId} {
+      allow create: if true;
+      allow read, update, delete: if false;
+    }
+  }
+}

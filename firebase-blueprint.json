@@ -1,0 +1,127 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "User account information and preferences",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["uid", "email"]
+    },
+    "Product": {
+      "title": "Product Item",
+      "description": "Store inventory item with photos, stock, pricing, and category",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "price": { "type": "number" },
+        "originalPrice": { "type": "number" },
+        "description": { "type": "string" },
+        "category": { "type": "string" },
+        "collection": { "type": "string" },
+        "image": { "type": "string" },
+        "images": { "type": "array", "items": { "type": "string" } },
+        "stock": { "type": "number" },
+        "sizes": { "type": "array", "items": { "type": "string" } },
+        "color": { "type": "string" },
+        "material": { "type": "string" },
+        "isFeatured": { "type": "boolean" },
+        "isNewArrival": { "type": "boolean" },
+        "isBestSeller": { "type": "boolean" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "name", "price", "category", "image"]
+    },
+    "Banner": {
+      "title": "Hero Banner Slide",
+      "description": "Home hero carousel banner slide with graphic, title, and action link",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "tag": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "image": { "type": "string" },
+        "ctaText": { "type": "string" },
+        "ctaLink": { "type": "string" },
+        "targetCollection": { "type": "string" },
+        "targetCategory": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "title", "image"]
+    },
+    "Order": {
+      "title": "Customer Order",
+      "description": "Feat customer order details",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "customerName": { "type": "string" },
+        "email": { "type": "string" },
+        "phone": { "type": "string" },
+        "totalAmount": { "type": "number" },
+        "status": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "totalAmount", "status"]
+    },
+    "PaymentLog": {
+      "title": "Payment Transaction Log",
+      "description": "Real-time payment logs, diagnostics, and failure metadata for tracking payment gateway sessions",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "orderId": { "type": "string" },
+        "paymentId": { "type": "string" },
+        "status": { "type": "string" },
+        "errorCode": { "type": "string" },
+        "errorReason": { "type": "string" },
+        "errorDescription": { "type": "string" },
+        "errorSource": { "type": "string" },
+        "errorStep": { "type": "string" },
+        "paymentMethod": { "type": "string" },
+        "amount": { "type": "number" },
+        "customerName": { "type": "string" },
+        "customerEmail": { "type": "string" },
+        "customerPhone": { "type": "string" },
+        "cartItemsCount": { "type": "number" },
+        "itemsSummary": { "type": "string" },
+        "elapsedSeconds": { "type": "number" },
+        "actionAdvice": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "timestamp", "status", "paymentMethod", "amount"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User account documents"
+    },
+    "/products/{productId}": {
+      "schema": "Product",
+      "description": "Store inventory products, stock count, and high-res photos"
+    },
+    "/banners/{bannerId}": {
+      "schema": "Banner",
+      "description": "Home page top hero banners and custom Shop Now links"
+    },
+    "/orders/{orderId}": {
+      "schema": "Order",
+      "description": "Customer order history"
+    },
+    "/payment_logs/{logId}": {
+      "schema": "PaymentLog",
+      "description": "Real-time transaction diagnostics and error metadata collection"
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "Feat: Feather Hut Fashion",
+  "description": "Feat: Feather Hut Fashion - Premier Indian Ethnic Fashion & Textile Store featuring Chanderi Silk Sarees, Designer Kurtis, Salwar Suits, and Dress Materials with nationwide delivery.",
+  "requestFramePermissions": [
+    "geolocation"
+  ],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,224 @@
+@import "tailwindcss";
+
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .font-luxury-serif {
+    font-family: 'Cormorant Garamond', 'Bodoni Moda', 'Playfair Display', Didot, 'Bodoni MT', 'Cinzel', Garamond, 'Times New Roman', serif;
+  }
+
+  /* Barbie Pink-White Themes */
+  .theme-barbie-bg {
+    background: linear-gradient(180deg, #fff0f7 0%, #ffe4f0 18%, #fff5fa 45%, #ffffff 100%);
+  }
+  .theme-barbie-card {
+    background: linear-gradient(180deg, #ffffff 0%, #fff7fb 100%);
+    border-color: #fbcfe8;
+  }
+  .theme-barbie-gradient-text {
+    background: linear-gradient(135deg, #e11d48 0%, #db2777 50%, #ec4899 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .btn-barbie-pink {
+    background: linear-gradient(135deg, #ff2a85 0%, #ec4899 50%, #f43f5e 100%);
+    color: #ffffff;
+    box-shadow: 0 4px 14px rgba(255, 42, 133, 0.25);
+  }
+  .btn-barbie-pink:hover {
+    background: linear-gradient(135deg, #e11d48 0%, #db2777 50%, #e11d48 100%);
+    box-shadow: 0 6px 20px rgba(225, 29, 72, 0.35);
+  }
+
+  /* Bubblegum Pink-White Themes */
+  .theme-bubblegum-bg {
+    background: linear-gradient(180deg, #fdf2f8 0%, #fce7f3 25%, #fff0f7 60%, #ffffff 100%);
+  }
+  .theme-bubblegum-card {
+    background: linear-gradient(180deg, #ffffff 0%, #fdf4f9 100%);
+    border-color: #f9a8d4;
+  }
+  .btn-bubblegum {
+    background: linear-gradient(135deg, #f472b6 0%, #ec4899 100%);
+    color: #ffffff;
+  }
+
+  /* Royal Golden-Pink Theme (Specifically for Sarees & Royal Handloom Heritage) */
+  .theme-royal-saree-bg {
+    background: linear-gradient(180deg, #fff2f8 0%, #fdf2f8 20%, #fffbf0 60%, #fff0f7 100%);
+  }
+  .theme-royal-saree-card {
+    background: linear-gradient(180deg, #fff5fa 0%, #fdf2f8 50%, #fffbf0 100%);
+    border: 2px solid #f59e0b;
+    box-shadow: 0 8px 25px rgba(236, 72, 153, 0.18);
+  }
+  .theme-royal-saree-hero {
+    background: linear-gradient(135deg, #9d174d 0%, #d97706 50%, #be185d 100%);
+    border: 1.5px solid #fcd34d;
+    box-shadow: 0 12px 36px rgba(217, 119, 6, 0.3);
+  }
+  .badge-royal-gold-pink {
+    background: linear-gradient(135deg, #f59e0b 0%, #db2777 50%, #d97706 100%);
+    color: #ffffff;
+    border: 1px solid #fde047;
+    box-shadow: 0 2px 10px rgba(219, 39, 119, 0.35);
+  }
+  .btn-royal-gold-pink {
+    background: linear-gradient(135deg, #f59e0b 0%, #ec4899 50%, #d97706 100%);
+    color: #ffffff;
+    font-weight: 800;
+    border: 1px solid #fde047;
+    box-shadow: 0 4px 16px rgba(245, 158, 11, 0.35);
+  }
+  .btn-royal-gold-pink:hover {
+    background: linear-gradient(135deg, #d97706 0%, #db2777 50%, #b45309 100%);
+    box-shadow: 0 6px 22px rgba(219, 39, 119, 0.45);
+  }
+  .gold-shimmer {
+    background: linear-gradient(90deg, #f59e0b 0%, #fef08a 50%, #f59e0b 100%);
+    background-size: 200% auto;
+    animation: goldShimmer 3s linear infinite;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+}
+
+@keyframes goldShimmer {
+  to {
+    background-position: 200% center;
+  }
+}
+
+/* Markdown Description Styling */
+.markdown-body {
+  color: #374151;
+  line-height: 1.7;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4 {
+  color: #500724;
+  font-weight: 800;
+  margin-top: 1rem;
+  margin-bottom: 0.5rem;
+  font-family: 'Playfair Display', Georgia, serif;
+}
+
+.markdown-body h1 { font-size: 1.25rem; }
+.markdown-body h2 { font-size: 1.125rem; }
+.markdown-body h3 { font-size: 1rem; }
+.markdown-body h4 { font-size: 0.875rem; }
+
+.markdown-body p {
+  margin-bottom: 0.75rem;
+}
+
+.markdown-body ul {
+  list-style-type: disc;
+  padding-left: 1.25rem;
+  margin-bottom: 0.75rem;
+}
+
+.markdown-body ol {
+  list-style-type: decimal;
+  padding-left: 1.25rem;
+  margin-bottom: 0.75rem;
+}
+
+.markdown-body li {
+  margin-bottom: 0.25rem;
+}
+
+.markdown-body strong {
+  color: #500724;
+  font-weight: 700;
+}
+
+.markdown-body em {
+  font-style: italic;
+}
+
+.markdown-body blockquote {
+  border-left: 3px solid #db2777;
+  background-color: #fdf2f8;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0 0.5rem 0.5rem 0;
+  margin-top: 0.5rem;
+  margin-bottom: 0.75rem;
+  color: #831843;
+  font-style: italic;
+}
+
+.markdown-body code {
+  background-color: #fce7f3;
+  color: #831843;
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.25rem;
+  font-size: 0.85em;
+  font-family: monospace;
+}
+
+.markdown-body hr {
+  border: 0;
+  border-top: 1px solid #fbcfe8;
+  margin: 1rem 0;
+}
+
+@keyframes feather-sparkle-fade {
+  0% {
+    opacity: 0.9;
+    transform: scale(1) translate(-50%, -50%);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.2) translate(-50%, 10px);
+  }
+}
+
+@keyframes wishlist-feather-hit {
+  0% {
+    transform: scale(1);
+  }
+  30% {
+    transform: scale(1.4) rotate(-8deg);
+    color: #e51975;
+  }
+  60% {
+    transform: scale(1.2) rotate(6deg);
+  }
+  100% {
+    transform: scale(1) rotate(0deg);
+  }
+}
+
+.animate-wishlist-hit {
+  animation: wishlist-feather-hit 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+@keyframes wishlist-feather-drop {
+  0% {
+    transform: scale(1) translateY(0);
+  }
+  30% {
+    transform: scale(0.8) translateY(-4px) rotate(8deg);
+  }
+  60% {
+    transform: scale(1.15) translateY(3px) rotate(-6deg);
+  }
+  100% {
+    transform: scale(1) translateY(0) rotate(0deg);
+  }
+}
+
+.animate-wishlist-drop {
+  animation: wishlist-feather-drop 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+

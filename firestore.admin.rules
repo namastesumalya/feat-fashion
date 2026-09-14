@@ -1,0 +1,128 @@
+rules_version = '2';
+
+// ============================================================================
+// FEATHER HUT FASHION (FEAT) - ADMIN SIDE FIRESTORE SECURITY RULES
+// FILE: firestore.admin.rules
+// Dedicated Access Controls, Schema Validations, and Authority Checks for Admins
+// ============================================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ------------------------------------------------------------------------
+    // SECTION 1: AUTHENTICATION & ADMIN AUTHORITY EVALUATION
+    // ------------------------------------------------------------------------
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Comprehensive Admin check: custom claim, designated email addresses, or super-admin UID
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.admin == true ||
+        request.auth.token.role == 'admin' ||
+        request.auth.token.email == 'admin@featherhutfashion.com' ||
+        request.auth.token.email == 'namastesumalya@gmail.com' ||
+        request.auth.uid == 'admin_featherhutfashion'
+      );
+    }
+
+    // ------------------------------------------------------------------------
+    // SECTION 2: ADMIN CATALOG MANAGEMENT (PRODUCTS, CATEGORIES, BANNERS)
+    // ------------------------------------------------------------------------
+    
+    // Products Collection
+    match /products/{productId} {
+      // Admins have full create, update, delete permissions with audit integrity
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Categories & Collections
+    match /categories/{categoryId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Promotional Banners & Hero Carousels
+    match /banners/{bannerId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Discount Coupons & Promo Codes
+    match /coupons/{couponId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // ------------------------------------------------------------------------
+    // SECTION 3: ADMIN ORDERS, SHIPMENTS & FULFILLMENT
+    // ------------------------------------------------------------------------
+    
+    // Customer Orders Collection
+    match /orders/{orderId} {
+      // Admins can read all orders, update status (Dispatch, Ship, Deliver, Cancel),
+      // assign AWB tracking numbers, and manage invoices
+      allow read: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+      allow create: if true; // Allows customer checkout & guest order recording
+    }
+
+    // Shiprocket Shipments & Automated Courier Sync
+    match /shipments/{shipmentId} {
+      allow read: if isAdmin();
+      allow write: if isAdmin();
+    }
+
+    // ------------------------------------------------------------------------
+    // SECTION 4: ADMIN ANALYTICS, AUDITS & LOGS
+    // ------------------------------------------------------------------------
+    
+    // Payment Failure Logs (Razorpay, PhonePe failure triage)
+    match /payment_failures/{failureId} {
+      allow read: if isAdmin();
+      allow write: if true; // Any client reporting checkout/gateway exceptions
+    }
+
+    // Audit Trails & Security Logs
+    match /audit_logs/{logId} {
+      allow read, write: if isAdmin();
+    }
+
+    // Site Settings & Configurations (Shiprocket credentials, SMS Gateway, Tax rates)
+    match /settings/{settingId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // ------------------------------------------------------------------------
+    // SECTION 5: CUSTOMER RELATIONSHIP MANAGEMENT (CRM) & USER PROFILES
+    // ------------------------------------------------------------------------
+    
+    // User Accounts & Profiles
+    match /users/{userId} {
+      allow read, write: if isAdmin();
+    }
+
+    // Customer Inquiries, Support Tickets & Contact Forms
+    match /contacts/{contactId} {
+      allow read, update, delete: if isAdmin();
+      allow create: if true;
+    }
+
+    // Customer Reviews & Feedback Moderation
+    match /reviews/{reviewId} {
+      allow read: if true;
+      allow update, delete: if isAdmin();
+      allow create: if isAuthenticated();
+    }
+
+    // Magic Feather Rewards & Referral Transactions
+    match /feather_transactions/{txId} {
+      allow read, write: if isAdmin();
+    }
+  }
+}

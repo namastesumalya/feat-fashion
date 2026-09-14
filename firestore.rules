@@ -1,0 +1,245 @@
+rules_version = '2';
+
+// ============================================================================
+// FEAT: FEATHER HUT FASHION - FIRESTORE SECURITY RULES
+// SEPARATE ACCESS CONTROLS FOR ADMINISTRATORS AND USERS / CUSTOMERS
+// ============================================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ========================================================================
+    // SECTION A: ROLE & AUTHENTICATION HELPER FUNCTIONS
+    // ========================================================================
+    
+    // Check if the request has an active authenticated session
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // ------------------------------------------------------------------------
+    // USER / CUSTOMER HELPERS
+    // ------------------------------------------------------------------------
+    
+    // Check if authenticated user's UID matches the target userId
+    function isUser(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Check if authenticated user is the owner/creator of the document
+    function isDocOwner() {
+      return isAuthenticated() && (
+        (resource != null && resource.data.userId == request.auth.uid) ||
+        (resource != null && resource.data.uid == request.auth.uid)
+      );
+    }
+
+    // Check if order belongs to the customer by UID or verified email
+    function isOrderOwner() {
+      return isAuthenticated() && (
+        (resource != null && resource.data.userId == request.auth.uid) ||
+        (resource != null && resource.data.customerEmail == request.auth.token.email) ||
+        (resource != null && resource.data.email == request.auth.token.email)
+      );
+    }
+
+    // Validate customer order payload structure and integrity
+    function isValidOrderCreate() {
+      return request.resource.data.items is list && 
+             request.resource.data.items.size() > 0 &&
+             request.resource.data.finalAmount >= 0;
+    }
+
+    // ------------------------------------------------------------------------
+    // ADMIN HELPERS
+    // ------------------------------------------------------------------------
+    
+    // Check if requester has verified administrative authority
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.admin == true ||
+        request.auth.token.email == 'admin@featherhutfashion.com' ||
+        request.auth.token.email == 'namastesumalya@gmail.com' ||
+        request.auth.uid == 'admin_featherhutfashion'
+      );
+    }
+
+
+    // ========================================================================
+    // SECTION B: USER / CUSTOMER COLLECTIONS & RULES
+    // ========================================================================
+
+    // ------------------------------------------------------------------------
+    // 1. USER PROFILES & PRIVATE ACCOUNT DATA
+    // ------------------------------------------------------------------------
+    // User Rules:
+    //   - Read: Allowed ONLY if the authenticated user is the profile owner.
+    //   - Create: Allowed if the user is creating their own profile; cannot self-grant admin role.
+    //   - Update: Allowed for profile owner without changing privileged role fields.
+    //   - Delete: Allowed for profile owner.
+    // Admin Rules:
+    //   - Full Read, Write, and Delete access for customer support and account auditing.
+    match /users/{userId} {
+      // READ PERMISSIONS
+      allow read: if isUser(userId) || isAdmin();
+      
+      // USER CREATE PERMISSION (Prevents privilege escalation)
+      allow create: if isUser(userId) && (
+        !('role' in request.resource.data) || 
+        request.resource.data.role == 'customer' || 
+        isAdmin()
+      );
+      
+      // USER UPDATE PERMISSION (Prevents non-admins from modifying their own role)
+      allow update: if (isUser(userId) && (
+        !('role' in request.resource.data) || 
+        request.resource.data.role == resource.data.role || 
+        isAdmin()
+      )) || isAdmin();
+      
+      // DELETE PERMISSION
+      allow delete: if isUser(userId) || isAdmin();
+
+      // User Personal Subcollections (addresses, wishlist, saved cards, cart items)
+      match /{userSubcollection=**} {
+        allow read, write: if isUser(userId) || isAdmin();
+      }
+    }
+
+    // ------------------------------------------------------------------------
+    // 2. PRODUCT REVIEWS (Customer Authored)
+    // ------------------------------------------------------------------------
+    // User Rules:
+    //   - Read: Public for all storefront visitors.
+    //   - Create: Authenticated users can submit reviews for products they purchase.
+    //   - Update / Delete: Allowed only for the original review author.
+    // Admin Rules:
+    //   - Full moderation and deletion access.
+    match /products/{productId}/reviews/{reviewId} {
+      allow read: if true;
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update: if (isAuthenticated() && resource.data.userId == request.auth.uid) || isAdmin();
+      allow delete: if (isAuthenticated() && resource.data.userId == request.auth.uid) || isAdmin();
+    }
+
+    // ------------------------------------------------------------------------
+    // 3. CUSTOMER ORDERS & SHIPMENT TRACKING
+    // ------------------------------------------------------------------------
+    // User / Customer Rules:
+    //   - Read: Public / Order owners tracking orders via Order Reference & phone.
+    //   - Create: Customers and guest shoppers can place new orders with valid cart items.
+    //   - Update / Delete: Strictly BLOCKED for regular users (prevents tampering with order status, prices, or tracking numbers).
+    // Admin Rules:
+    //   - Full Read, Update (dispatch status, courier airway bill, refund), and Delete authority.
+    match /orders/{orderId} {
+      allow read: if isOrderOwner() || isAdmin();
+      allow create: if isValidOrderCreate();
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // ------------------------------------------------------------------------
+    // 4. REAL-TIME PAYMENT LOGS & DIAGNOSTICS
+    // ------------------------------------------------------------------------
+    // User / Customer Rules:
+    //   - Create: Allowed to log failed, cancelled, or timed-out transactions from checkout.
+    //   - Read, Update, Delete: BLOCKED for standard users (ensures customer transaction privacy).
+    // Admin Rules:
+    //   - Full Read, Update, and Delete access for debugging gateway issues in real-time.
+    match /payment_logs/{logId} {
+      allow create: if true;
+      allow read, update, delete: if isAdmin();
+    }
+
+
+    // ========================================================================
+    // SECTION C: STOREFRONT / PUBLIC READ & ADMIN-ONLY WRITE COLLECTIONS
+    // ========================================================================
+
+    // ------------------------------------------------------------------------
+    // 5. PRODUCT CATALOG & INVENTORY MANAGEMENT
+    // ------------------------------------------------------------------------
+    // User Rules:
+    //   - Read: Public for all shoppers to browse products, prices, and stock.
+    //   - Write / Delete: Strictly FORBIDDEN for standard users.
+    // Admin Rules:
+    //   - Full Create, Update (inventory, pricing, discount, media), and Delete permissions.
+    match /products/{productId} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    // ------------------------------------------------------------------------
+    // 6. HERO CAROUSEL BANNERS & HOMEPAGE ASSETS
+    // ------------------------------------------------------------------------
+    // User Rules:
+    //   - Read: Public for dynamic homepage hero carousels and promotional slides.
+    // Admin Rules:
+    //   - Create, Update, and Delete banners.
+    match /banners/{bannerId} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    // ------------------------------------------------------------------------
+    // 7. PROMO CODES & DISCOUNT COUPONS
+    // ------------------------------------------------------------------------
+    // User Rules:
+    //   - Read: Public so checkout cart engine can validate promo codes and minimum spend.
+    // Admin Rules:
+    //   - Create, Update discount percentages, set expiry dates, and Delete promo codes.
+    match /promos/{promoId} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    // ------------------------------------------------------------------------
+    // 8. STORE SETTINGS & LIVE SALE CONFIGURATION
+    // ------------------------------------------------------------------------
+    // User Rules:
+    //   - Read: Public for store marquee banner, announcement tickers, and live flash sale countdowns.
+    // Admin Rules:
+    //   - Create and Update store configurations, sales end times, and discount banners.
+    match /settings/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /live_sale/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // ------------------------------------------------------------------------
+    // 9. IN-APP PUSH NOTIFICATIONS & ALERTS
+    // ------------------------------------------------------------------------
+    // User Rules:
+    //   - Read: Public for in-app announcements and broadcast notifications.
+    //   - Create: Authenticated users can trigger notifications (e.g., order placed event).
+    // Admin Rules:
+    //   - Create, Update, and Delete store-wide broadcasts and administrative announcements.
+    match /notifications/{notifId} {
+      allow read: if true;
+      allow create: if isAuthenticated() || isAdmin();
+      allow update, delete: if isAdmin();
+    }
+
+    // ------------------------------------------------------------------------
+    // 10. SYSTEM HEALTH CHECK / DIAGNOSTIC PROBE
+    // ------------------------------------------------------------------------
+    match /test/{testId} {
+      allow read: if true;
+      allow write: if isAuthenticated() || isAdmin();
+    }
+
+    // ------------------------------------------------------------------------
+    // 11. MAGIC FEATHER TRANSACTIONS & REWARDS
+    // ------------------------------------------------------------------------
+    match /feather_transactions/{txId} {
+      allow read: if isDocOwner() || isAdmin();
+      allow create: if isAuthenticated() || isAdmin();
+      allow update, delete: if isAdmin();
+    }
+  }
+}
+
