@@ -5714,11 +5714,8 @@ async function startServer() {
       ]
     };
 
-    // Activate Shiprocket shipment for successful payment transactions & COD orders
-    if (newOrder.paymentStatus === 'Paid' || newOrder.paymentMethod === 'COD') {
-      await createShiprocketShipment(newOrder);
-    }
-
+    // Persist the order before contacting Shiprocket. Mobile networks and browser
+    // timeouts must not make a successfully placed order disappear.
     const existingOrderIndex = orders.findIndex(o => o.id === newOrder.id);
     if (existingOrderIndex >= 0) {
       orders[existingOrderIndex] = newOrder;
@@ -5726,6 +5723,18 @@ async function startServer() {
       orders.unshift(newOrder);
     }
     saveOrdersToDisk(newOrder);
+
+    // Shiprocket is a fulfillment side effect, not a prerequisite for confirming
+    // the order. Run it after persistence so slow/blocked mobile requests can
+    // still receive the order response and the admin can retry dispatch later.
+    if (newOrder.paymentStatus === 'Paid' || newOrder.paymentMethod === 'COD') {
+      void createShiprocketShipment(newOrder).catch((error: any) => {
+        newOrder.shiprocketSyncStatus = 'pickup_failed';
+        newOrder.shiprocketSyncError = error?.message || 'Shiprocket dispatch failed';
+        saveOrdersToDisk(newOrder);
+        console.error(`[Shiprocket Logistics] Async dispatch failed for Order #${newOrder.id}:`, error);
+      });
+    }
 
     // 1. If buyer used Magic Feathers, record redeemed feather transaction
     if (reqFeathersUsed > 0) {
