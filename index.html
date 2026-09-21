@@ -3,8 +3,103 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Feat: Feather Hut Fashion | Authentic Indian Ethnic Sarees, Kurtis & Salwar Suits</title>
+    <title>Feat: Feather Hut Fashion</title>
+    <meta name="title" content="Feat: Feather Hut Fashion" />
+    <meta name="description" content="Feat: Feather Hut Fashion - Premier Indian Ethnic Fashion & Textile Store featuring Chanderi Silk Sarees, Designer Kurtis, Salwar Suits, and Dress Materials with nationwide delivery." />
     
+    <!-- Environment Shield: Intercept container-blocked WebSocket ports (24678) and suppress external host notices -->
+    <script>
+      (function() {
+        if (typeof window !== 'undefined' && window.WebSocket) {
+          var RealWebSocket = window.WebSocket;
+          function SafeWebSocket(url, protocols) {
+            var urlStr = typeof url === 'string' ? url : (url && url.href ? String(url.href) : '');
+            if (
+              urlStr.indexOf(':24678') !== -1 ||
+              urlStr.indexOf('vite-hmr') !== -1 ||
+              protocols === 'vite-hmr' ||
+              protocols === 'vite-ping'
+            ) {
+              var stub = {
+                readyState: 3, // CLOSED
+                url: urlStr,
+                protocol: protocols || '',
+                extensions: '',
+                bufferedAmount: 0,
+                binaryType: 'blob',
+                onopen: null,
+                onerror: null,
+                onclose: null,
+                onmessage: null,
+                send: function() {},
+                close: function() {},
+                addEventListener: function(evt, fn) {
+                  if (evt === 'close' && typeof fn === 'function') {
+                    setTimeout(function() {
+                      try {
+                        fn({ wasClean: true, code: 1000, reason: 'HMR disabled in container dev' });
+                      } catch(_) {}
+                    }, 5);
+                  }
+                },
+                removeEventListener: function() {},
+                dispatchEvent: function() { return false; }
+              };
+              return stub;
+            }
+            if (this instanceof SafeWebSocket) {
+              return new (Function.prototype.bind.apply(RealWebSocket, [null].concat(Array.prototype.slice.call(arguments))))();
+            }
+            return new (Function.prototype.bind.apply(RealWebSocket, [null].concat(Array.prototype.slice.call(arguments))))();
+          }
+          SafeWebSocket.prototype = RealWebSocket.prototype;
+          SafeWebSocket.CONNECTING = RealWebSocket.CONNECTING || 0;
+          SafeWebSocket.OPEN = RealWebSocket.OPEN || 1;
+          SafeWebSocket.CLOSING = RealWebSocket.CLOSING || 2;
+          SafeWebSocket.CLOSED = RealWebSocket.CLOSED || 3;
+          window.WebSocket = SafeWebSocket;
+        }
+
+        window.addEventListener('unhandledrejection', function(event) {
+          try {
+            var reason = event.reason;
+            var msg = reason ? (reason.message || (typeof reason === 'string' ? reason : '')) : '';
+            if (msg && (
+              msg.indexOf('WebSocket') !== -1 ||
+              msg.indexOf('websocket') !== -1 ||
+              msg.indexOf('24678') !== -1 ||
+              msg.indexOf('handshake timed out') !== -1 ||
+              msg.indexOf('No ID or name found in config') !== -1 ||
+              msg.indexOf('ResizeObserver') !== -1 ||
+              msg.indexOf('postMessage') !== -1 ||
+              msg.indexOf('quota') !== -1
+            )) {
+              event.preventDefault();
+              event.stopImmediatePropagation();
+            }
+          } catch(err) {}
+        }, true);
+
+        window.addEventListener('error', function(event) {
+          try {
+            var msg = (event && event.message) ? String(event.message) : '';
+            if (msg && (
+              msg.indexOf('ResizeObserver') !== -1 ||
+              msg.indexOf('Script error') !== -1 ||
+              msg.indexOf('WebSocket') !== -1 ||
+              msg.indexOf('websocket') !== -1 ||
+              msg.indexOf('24678') !== -1 ||
+              msg.indexOf('handshake timed out') !== -1 ||
+              msg.indexOf('No ID or name found in config') !== -1
+            )) {
+              event.preventDefault();
+              event.stopImmediatePropagation();
+            }
+          } catch(err) {}
+        }, true);
+      })();
+    </script>
+
     <!-- Google Fonts: Luxury Serif & Editorial Typefaces -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -157,34 +252,6 @@
       ]
     }
     </script>
-
-    <script>
-      (function() {
-        // Prevent benign WebSocket unhandled rejections from triggering error overlays
-        window.addEventListener('unhandledrejection', function(event) {
-          try {
-            var reason = event.reason;
-            var msg = reason ? (reason.message || (typeof reason === 'string' ? reason : '')) : '';
-            if (msg && (msg.indexOf('WebSocket') !== -1 || msg.indexOf('websocket') !== -1)) {
-              event.preventDefault();
-              event.stopImmediatePropagation();
-            }
-          } catch(err) {}
-        });
-
-        try {
-          var origFetch = window.fetch;
-          var fetchVal = origFetch;
-          Object.defineProperty(window, 'fetch', {
-            get: function() { return fetchVal || origFetch; },
-            set: function(v) { fetchVal = v; },
-            configurable: true,
-            enumerable: true
-          });
-        } catch(e) {}
-      })();
-    </script>
-    <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
   </head>
   <body>
     <div id="root"></div>

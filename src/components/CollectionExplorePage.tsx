@@ -1,11 +1,13 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Product, CollectionType } from '../types';
 import { ProductCard } from './ProductCard';
+import { LoadMoreSkeletonCard } from './LoadMoreSkeletonCard';
 import { CatalogFilterBar } from './CatalogFilterBar';
 import { deduplicateProducts } from '../utils/productUtils';
 import { 
   ArrowLeft, Filter, Crown, 
-  Layers, Gift, Check, Flame, ShoppingBag, ShieldCheck, Search
+  Layers, Gift, Check, Flame, ShoppingBag, ShieldCheck, Search,
+  ChevronDown, ChevronUp, ArrowRight
 } from 'lucide-react';
 
 export interface CollectionPageConfig {
@@ -61,6 +63,16 @@ export const EXCLUSIVE_COLLECTION_CONFIGS: Record<string, CollectionPageConfig> 
     accentGradient: 'from-pink-600 via-rose-500 to-pink-700'
   },
   'present-is-gifted': {
+    slug: 'present-is-gifted',
+    collectionValue: "'Present is Gifted' Collection",
+    title: 'Present is Gifted',
+    subtitle: 'Luxury Gift Ready Hampers & Elegantly Boxed Apparel',
+    badge: 'Luxury Hampers',
+    heroImage: '/Presentisgifted.jpeg',
+    description: 'Curated apparel sets packaged in signature luxury gift boxes. Perfect for weddings, birthdays, festive returns, and honoring loved ones.',
+    accentGradient: 'from-fuchsia-600 via-pink-600 to-rose-600'
+  },
+  'gift-is-present': {
     slug: 'present-is-gifted',
     collectionValue: "'Present is Gifted' Collection",
     title: 'Present is Gifted',
@@ -155,6 +167,18 @@ export const CollectionExplorePage: React.FC<CollectionExplorePageProps> = ({
 
     return deduplicateProducts(result);
   }, [collectionProducts, selectedCategoryFilter, priceRange, sortBy]);
+
+  // Progressive Pagination: Initial 10 items, load 10 more sequentially
+  const [visibleCount, setVisibleCount] = useState<number>(10);
+
+  // Reset pagination when collection, category filter, price, or sort changes
+  useEffect(() => {
+    setVisibleCount(10);
+  }, [cleanSlug, selectedCategoryFilter, priceRange, sortBy]);
+
+  const displayedItems = useMemo(() => {
+    return filteredProducts.slice(0, visibleCount);
+  }, [filteredProducts, visibleCount]);
 
   const otherCollections = Object.values(EXCLUSIVE_COLLECTION_CONFIGS);
   const isRoyalCollection = cleanSlug === 'jashn' || cleanSlug === 'firdausi';
@@ -293,23 +317,72 @@ export const CollectionExplorePage: React.FC<CollectionExplorePageProps> = ({
 
         {/* Product Grid */}
         {filteredProducts.length > 0 ? (
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 gap-3 sm:gap-6">
-            {filteredProducts.map((product) => {
-              const isWishlisted = wishlist.some((w) => w.id === product.id);
+          <>
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 gap-3 sm:gap-6">
+              {displayedItems.map((product) => {
+                const isWishlisted = wishlist.some((w) => w.id === product.id);
 
-              return (
-                <div key={product.id} className="w-full">
-                  <ProductCard
-                    product={product}
-                    onSelect={onSelectProduct}
-                    onAddToCart={onAddToCart}
-                    isWishlisted={isWishlisted}
-                    onToggleWishlist={onToggleWishlist}
+                return (
+                  <div key={product.id} className="w-full">
+                    <ProductCard
+                      product={product}
+                      onSelect={onSelectProduct}
+                      onAddToCart={onAddToCart}
+                      isWishlisted={isWishlisted}
+                      onToggleWishlist={onToggleWishlist}
+                    />
+                  </div>
+                );
+              })}
+
+              {/* Skeleton Product Card at end of grid acting as Load More */}
+              {visibleCount < filteredProducts.length && (
+                <div className="w-full">
+                  <LoadMoreSkeletonCard
+                    onLoadMore={() => setVisibleCount(prev => Math.min(prev + 10, filteredProducts.length))}
+                    remainingCount={filteredProducts.length - visibleCount}
+                    batchSize={Math.min(10, filteredProducts.length - visibleCount)}
+                    theme="light"
                   />
                 </div>
-              );
-            })}
-          </div>
+              )}
+            </div>
+
+            {/* Progressive Pagination Controls */}
+            <div className="pt-8 pb-4 border-t border-pink-100 flex flex-col items-center gap-4">
+              <div className="flex items-center gap-2 text-xs font-bold text-gray-600 bg-white px-4 py-2 rounded-full border border-pink-200/80 shadow-xs">
+                <span>Showing</span>
+                <span className="text-[#e51975] font-black">{Math.min(visibleCount, filteredProducts.length)}</span>
+                <span>of</span>
+                <span className="text-[#e51975] font-black">{filteredProducts.length}</span>
+                <span>creations in {config.title}</span>
+              </div>
+
+              {/* Visual Progress Bar */}
+              <div className="w-56 max-w-full h-1.5 bg-pink-100 rounded-full overflow-hidden">
+                <div 
+                  className="h-full bg-gradient-to-r from-amber-500 to-[#ff2a85] rounded-full transition-all duration-300"
+                  style={{ width: `${Math.min(100, Math.round((Math.min(visibleCount, filteredProducts.length) / Math.max(1, filteredProducts.length)) * 100))}%` }}
+                />
+              </div>
+
+              <div className="flex flex-wrap items-center justify-center gap-3 w-full sm:w-auto">
+                {visibleCount > 10 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setVisibleCount(10);
+                      window.scrollTo({ top: 380, behavior: 'smooth' });
+                    }}
+                    className="flex items-center justify-center gap-2 px-5 py-3 rounded-2xl bg-white text-gray-700 hover:text-pink-950 border border-pink-200/90 font-extrabold text-xs hover:bg-pink-50 shadow-xs active:scale-[0.98] transition-all"
+                  >
+                    <ChevronUp className="w-4 h-4 text-[#e51975] stroke-[2.5]" />
+                    <span>Reset to 10 Pieces</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          </>
         ) : (
           <div className="bg-white rounded-3xl p-12 text-center border border-pink-100 space-y-4 max-w-md mx-auto my-8">
             <div className="w-14 h-14 mx-auto rounded-2xl bg-pink-50 text-[#e51975] flex items-center justify-center">

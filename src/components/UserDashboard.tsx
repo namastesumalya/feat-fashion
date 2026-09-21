@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { userDb } from '../firebase';
+import { sanitizeForFirestore } from '../firebaseAdmin';
 import { Order, DeliveryAddress, Product } from '../types';
 import { downloadTaxInvoice } from '../utils/invoiceGenerator';
 import { getLiveLocationAndAddress } from '../utils/geolocation';
@@ -19,7 +20,7 @@ import { getStoredCustomerSession } from '../services/authService';
 import { 
   getUserReferralProfile, 
   createUserReferralCode, 
-  fastForwardFeatherMaturity, 
+  acknowledgeFeatherCredit, 
   checkReferralCodeAvailability,
   UserReferralProfile, 
   MagicFeatherTransaction, 
@@ -27,6 +28,7 @@ import {
   MagicFeatherSvg 
 } from '../services/referralService';
 import { triggerFeatherAnimation } from './FloatingFeatherAnimation';
+import { RealWorld12DayFeatherCelebration } from './RealWorld12DayFeatherCelebration';
 
 export interface UserDashboardProps {
   isOpen?: boolean;
@@ -150,13 +152,16 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
   const [createCodeError, setCreateCodeError] = useState<string | null>(null);
   const [createCodeSuccess, setCreateCodeSuccess] = useState<string | null>(null);
   const [copiedLink, setCopiedLink] = useState(false);
-  const [fastForwardingId, setFastForwardingId] = useState<string | null>(null);
 
   // Live Referral Code Availability State (Must check if taken before enabling save)
   const [checkingCodeAvailability, setCheckingCodeAvailability] = useState(false);
   const [codeAvailability, setCodeAvailability] = useState<'idle' | 'checking' | 'available' | 'taken' | 'invalid' | 'unverified'>('idle');
   const [codeAvailabilityMsg, setCodeAvailabilityMsg] = useState<string | null>(null);
   const [verifiedAvailableCode, setVerifiedAvailableCode] = useState<string | null>(null);
+  
+  // Real-world 12-day referral maturity celebration state
+  const [celebrationTx, setCelebrationTx] = useState<MagicFeatherTransaction | null>(null);
+  const [isCelebrationOpen, setIsCelebrationOpen] = useState(false);
 
   const fetchReferralData = async () => {
     if (!currentUser?.uid && !currentUser?.email) return;
@@ -166,6 +171,24 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
       setReferralProfile(data);
       if (data.referralCode) {
         setNewCodeInput(data.referralCode);
+      }
+
+      // Check if any transaction was matured by the backend (friend kept order 12+ days without return)
+      if (typeof window !== 'undefined' && data?.transactions) {
+        const uncelebratedMatured = data.transactions.find(tx => 
+          tx.status === 'credited' && 
+          tx.type === 'referral_earned' && 
+          tx.orderId !== 'SIGNUP_REFERRAL' &&
+          tx.orderId !== 'SIGNUP_BONUS' &&
+          (tx.isNewCredit || !sessionStorage.getItem(`celebrated_matured_tx_${tx.id}`))
+        );
+
+        if (uncelebratedMatured) {
+          sessionStorage.setItem(`celebrated_matured_tx_${uncelebratedMatured.id}`, 'true');
+          setCelebrationTx(uncelebratedMatured);
+          setIsCelebrationOpen(true);
+          acknowledgeFeatherCredit(uncelebratedMatured.id);
+        }
       }
     } catch (err) {
       console.error('Failed to load referral profile:', err);
@@ -321,26 +344,6 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
       setCreateCodeError(err.message || 'Error creating referral code. Try another one.');
     } finally {
       setCreatingCode(false);
-    }
-  };
-
-  // Fast forward simulation for 12-day testing
-  const handleFastForward = async (txId: string) => {
-    setFastForwardingId(txId);
-    try {
-      const res = await fastForwardFeatherMaturity(txId, 12);
-      if (res.success) {
-        triggerFeatherAnimation({
-          featherCount: 16,
-          durationMs: 2500,
-          label: 'Matured & Credited! +Feathers ✨'
-        });
-        await fetchReferralData();
-      }
-    } catch (err) {
-      console.error('Fast forward error:', err);
-    } finally {
-      setFastForwardingId(null);
     }
   };
 
@@ -563,7 +566,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
           updatedAt: new Date().toISOString()
         };
         if (userDb) {
-          await setDoc(doc(userDb, 'users', currentUser.uid), payload, { merge: true }).catch(() => {});
+          await setDoc(doc(userDb, 'users', currentUser.uid), sanitizeForFirestore(payload), { merge: true }).catch(() => {});
         }
       } catch (err) {
         console.warn('Firestore profile save note:', err);
@@ -596,7 +599,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
           savedAddresses: updatedList,
           updatedAt: new Date().toISOString()
         };
-        await setDoc(doc(userDb, 'users', currentUser.uid), payload, { merge: true }).catch(() => {});
+        await setDoc(doc(userDb, 'users', currentUser.uid), sanitizeForFirestore(payload), { merge: true }).catch(() => {});
       } catch (err) {
         console.warn('Firestore address save note:', err);
       }
@@ -613,7 +616,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
           savedAddresses: updated,
           updatedAt: new Date().toISOString()
         };
-        await setDoc(doc(userDb, 'users', currentUser.uid), payload, { merge: true }).catch(() => {});
+        await setDoc(doc(userDb, 'users', currentUser.uid), sanitizeForFirestore(payload), { merge: true }).catch(() => {});
       } catch (err) {
         console.warn('Firestore address delete note:', err);
       }
@@ -710,7 +713,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
       const isCod = selectedOrder.paymentMethod === 'COD';
       const msg = isCod
         ? `Order #${selectedOrder.id} has been cancelled successfully. Shiprocket courier pickup has been revoked. Since this was a Cash on Delivery (COD) order, no payment was charged.`
-        : `Order #${selectedOrder.id} cancelled successfully. Shiprocket courier pickup recalled and automated refund of ₹${selectedOrder.finalAmount.toLocaleString('en-IN')} initiated to your original ${selectedOrder.paymentMethod} account.`;
+        : `Order #${selectedOrder.id} cancelled successfully. Shiprocket courier pickup recalled and automated refund of ₹${(selectedOrder.finalAmount ?? 0).toLocaleString('en-IN')} initiated to your original ${selectedOrder.paymentMethod} account.`;
 
       setCancelFeedback({
         type: 'success',
@@ -993,12 +996,12 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
 
                           <div className="flex-1 min-w-0">
                             <h5 className="font-bold text-xs sm:text-sm text-gray-900 group-hover:text-pink-900 transition-colors line-clamp-1">
-                              {order.items[0]?.product.name}
+                              {order.items?.[0]?.product?.name || 'Item'}
                             </h5>
                             <div className="flex flex-wrap items-center gap-2 text-[11px] text-gray-500 mt-1">
-                              <span>{order.items.length} Item(s)</span>
+                              <span>{(order.items || []).length} Item(s)</span>
                               <span>•</span>
-                              <span>Total: <strong className="text-gray-900 font-serif">₹{order.finalAmount.toLocaleString('en-IN')}</strong></span>
+                              <span>Total: <strong className="text-gray-900 font-serif">₹{(order.finalAmount ?? 0).toLocaleString('en-IN')}</strong></span>
                               <span>•</span>
                               <span className="text-pink-800 font-medium">{order.paymentMethod} ({order.paymentStatus})</span>
                               {order.shiprocketAwbCode && (
@@ -1300,26 +1303,19 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                         </div>
                       </div>
 
-                      <button
-                        type="button"
-                        onClick={() => {
-                          triggerFeatherAnimation({
-                            featherCount: 16,
-                            durationMs: 3000,
-                            label: '✨ Magic Feathers Floating! ✨'
-                          });
-                        }}
-                        className="px-3.5 py-1.5 rounded-full bg-white/15 hover:bg-white/25 border border-white/30 text-white text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer backdrop-blur-xs shadow-sm"
-                        title="Click to view the magic feather floating animation"
+                      {/* Backend-Authoritative Milestone Badge */}
+                      <div 
+                        className="flex items-center gap-2 px-3.5 py-2 rounded-2xl bg-white/10 backdrop-blur-md border border-white/20 text-white text-xs font-semibold shadow-inner"
+                        title="Magic Feathers are automatically credited to your Available Balance when your friend keeps the order for 12 or more days without cancellation or return."
                       >
-                        <Sparkles className="w-3.5 h-3.5 text-amber-200" />
-                        <span>Animate Feathers</span>
-                      </button>
+                        <ShieldCheck className="w-4 h-4 text-emerald-300 shrink-0" />
+                        <span>Backend Automated: Credited After 12 Days Kept (0 Returns)</span>
+                      </div>
                     </div>
 
                     {/* Stats Metric Cards */}
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
-                      <div className="bg-white/10 backdrop-blur-md rounded-2xl p-3.5 border border-white/20">
+                      <div id="feather-available-balance-card" className="bg-white/10 backdrop-blur-md rounded-2xl p-3.5 border border-white/20 transition-all duration-300">
                         <div className="flex items-center justify-between text-amber-100 text-xs font-medium">
                           <span>Available Balance</span>
                           <Coins className="w-4 h-4 text-amber-300" />
@@ -1825,7 +1821,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                                 <span>{new Date(tx.createdAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
                                 {tx.orderBillingValue ? (
                                   <span>
-                                    Order Value: ₹{tx.orderBillingValue.toLocaleString('en-IN')}
+                                    Order Value: ₹{(tx.orderBillingValue ?? 0).toLocaleString('en-IN')}
                                     {tx.rewardPercent ? ` (${tx.rewardPercent}% = ${tx.feathers} feathers)` : ` (${tx.feathers} feathers)`}
                                   </span>
                                 ) : null}
@@ -1845,22 +1841,15 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                                 </span>
                               </div>
 
-                              {/* Interactive Fast-Forward Simulation Button (For Testing 12-Day Condition) */}
+                              {/* Status Badge: 12-Day Return Hold (Backend Automatically Credits on Maturity) */}
                               {isPending && (
-                                <button
-                                  type="button"
-                                  disabled={fastForwardingId === tx.id}
-                                  onClick={() => handleFastForward(tx.id)}
-                                  className="px-2.5 py-1.5 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-[10px] font-bold shadow-2xs transition-colors shrink-0 flex items-center gap-1 cursor-pointer"
-                                  title="Dev testing: Simulates 12 days passing without a return so the feathers unlock immediately"
+                                <div 
+                                  className="px-2.5 py-1.5 bg-amber-50 border border-amber-200/80 text-amber-900 rounded-lg text-[10px] font-bold shadow-2xs shrink-0 flex items-center gap-1.5"
+                                  title="Held for 12 days to verify order is kept without return. Backend will automatically credit to Available Balance once 12 days pass."
                                 >
-                                  {fastForwardingId === tx.id ? (
-                                    <RefreshCw className="w-3 h-3 animate-spin" />
-                                  ) : (
-                                    <Clock className="w-3 h-3" />
-                                  )}
-                                  <span>Test Fast-Forward 12D</span>
-                                </button>
+                                  <Clock className="w-3 h-3 text-amber-600" />
+                                  <span>12-Day Return Hold</span>
+                                </div>
                               )}
                             </div>
                           </div>
@@ -2330,7 +2319,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                     <span>100% Money-Back Automated Refund:</span>
                   </p>
                   <p className="text-[11px] mt-1 leading-relaxed">
-                    Cancelling will immediately recall the Shiprocket courier dispatch and initiate an automated 100% full refund of <strong>₹{selectedOrder.finalAmount.toLocaleString('en-IN')}</strong> back to your original payment method ({selectedOrder.paymentMethod}). Most UPI and bank transfers credit within 5-7 business days.
+                    Cancelling will immediately recall the Shiprocket courier dispatch and initiate an automated 100% full refund of <strong>₹{(selectedOrder.finalAmount ?? 0).toLocaleString('en-IN')}</strong> back to your original payment method ({selectedOrder.paymentMethod}). Most UPI and bank transfers credit within 5-7 business days.
                   </p>
                 </div>
               )}
@@ -2402,6 +2391,16 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
           </div>
         </div>
       )}
+
+      {/* REAL-WORLD SCENARIO 12-DAY FEATHER CELEBRATION MODAL */}
+      <RealWorld12DayFeatherCelebration
+        isOpen={isCelebrationOpen}
+        onClose={() => setIsCelebrationOpen(false)}
+        transaction={celebrationTx}
+        onFeathersLanded={() => {
+          fetchReferralData();
+        }}
+      />
 
     </div>
   );

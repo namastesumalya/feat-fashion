@@ -7,8 +7,12 @@ import { SizeChartModal } from './SizeChartModal';
 import { ProductReviewsSection } from './ProductReviewsSection';
 import { getShiprocketDeliveryEstimate, computeFallbackEstimate } from '../utils/deliveryEstimation';
 import { getCategoryFallbackImage } from '../utils/productImage';
-import { fetchImageFromFirestore } from '../firebaseAdmin';
 import { deduplicateProducts } from '../utils/productUtils';
+import { 
+  pruneIneligibleCoupons, 
+  isCouponEligibleForProducts, 
+  getCouponType 
+} from '../utils/couponEligibility';
 import { getLiveLocationAndAddress } from '../utils/geolocation';
 
 interface ProductDetailPageProps {
@@ -35,11 +39,12 @@ interface ProductDetailPageProps {
   }) => Promise<void | ProductReview>;
   appliedPromo?: { code: string; discount: number; description: string } | null;
   appliedPromos?: AppliedPromo[];
-  onApplyPromo?: (code: string, contextPrice?: number) => Promise<{ valid: boolean; message?: string }> | void;
+  onApplyPromo?: (code: string, contextPrice?: number, targetProduct?: Product) => Promise<{ valid: boolean; message?: string }> | void;
   onRemovePromo?: (code?: string) => void;
   onExploreCategory?: (category: string) => void;
   onExploreCollection?: (collection: string) => void;
   promos?: PromoCode[];
+  isFirstOrder?: boolean;
 }
 
 export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
@@ -47,6 +52,7 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
   allProducts = [],
   orders = [],
   currentUser,
+  isFirstOrder,
   onBack,
   onSelectProduct,
   onAddToCart,
@@ -221,34 +227,91 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
   const selectedSizeUnits = getSizeStock(selectedSize);
   const isSelectedSizeOutOfStock = isProductOutOfStock || selectedSizeUnits === 0;
   const effectiveQuantity = selectedSizeUnits > 0 ? Math.min(Math.max(1, selectedQuantity), selectedSizeUnits) : 1;
-  const currentPurchaseValue = product.price * effectiveQuantity;
+  const currentPurchaseValue = (product.price || 0) * effectiveQuantity;
 
-  // Auto-revoke coupons when pieces are removed and purchase value falls below threshold:
-  // - If purchase value <= 2000, revoke FEAT2.0
-  // - If purchase value <= 1300 OR purchase value > 2000, revoke FEAT6 (over 2000 user gets FEAT2.0 only, not FEAT6)
+  const hasPriorOrders = useMemo(() => {
+    return (orders || []).some(o => {
+      if (o.orderStatus === 'Cancelled' || (o.orderStatus as string) === 'Returned') return false;
+      if (o.paymentStatus === 'Void' || o.paymentStatus === 'Failed') return false;
+      const oid = (o.id || '').toUpperCase();
+      if (oid.startsWith('TEST') || oid.startsWith('DEMO') || oid.includes('MOCK') || oid.includes('DUMMY')) return false;
+      if ((o.finalAmount || 0) <= 10) return false;
+
+      const orderEmail = (o.customerEmail || '').trim().toLowerCase();
+      if (orderEmail.endsWith('@example.com') || orderEmail.includes('mock') || orderEmail.includes('dummy')) return false;
+
+      const userEmail = (currentUser?.email || '').trim().toLowerCase();
+      const orderPhone = (o.deliveryAddress?.phone || '').replace(/\D/g, '');
+      const userPhone = (currentUser?.phone || '').replace(/\D/g, '');
+      const orderUid = o.userId || '';
+      const userUid = currentUser?.uid || '';
+
+      const normOrderPhone = orderPhone.slice(-10);
+      const normUserPhone = userPhone.slice(-10);
+      const phoneMatches = Boolean(
+        normUserPhone.length >= 10 &&
+        normOrderPhone.length >= 10 &&
+        normOrderPhone === normUserPhone
+      );
+
+      return (userEmail && orderEmail && userEmail === orderEmail) ||
+             phoneMatches ||
+             (userUid && orderUid && userUid === orderUid);
+    });
+  }, [orders, currentUser]);
+
+  const effectiveIsFirstOrder = isFirstOrder !== undefined ? isFirstOrder : !hasPriorOrders;
+
+  // Auto-revoke coupons when pieces are removed and purchase value falls below threshold or eligibility changes:
+  // - If first order: revoke FEAT6 and FEAT2.0 (only WELCOME76 is allowed)
+  // - If returning order: revoke WELCOME76 (only FEAT6 or FEAT2.0 allowed)
+  // - If purchase value < 2000: revoke FEAT2.0
+  // - If purchase value < 1300 OR purchase value >= 2000: revoke FEAT6 (over 2000 user qualifies for FEAT2.0 only)
   // - Permanently revoke FEAT200 / FLAT200
   useEffect(() => {
     const currentVal = product.price * effectiveQuantity;
-    if (currentVal <= 2000 && isPromoApplied('FEAT2.0')) {
-      if (onRemovePromo) onRemovePromo('FEAT2.0');
+    if (effectiveIsFirstOrder && (isPromoApplied('FEAT6') || isPromoApplied('FEAT2.0'))) {
+      if (onRemovePromo) {
+        onRemovePromo('FEAT6');
+        onRemovePromo('FEAT2.0');
+      }
       setPromoStatusMsg({
-        code: 'FEAT2.0',
-        text: 'FEAT2.0 requires product purchase value over ₹2,000.',
+        code: 'WELCOME76',
+        text: 'On your first order, enjoy Welcome76 (₹76 OFF). Tier codes FEAT6 and FEAT2.0 are reserved for your 2nd order onwards.',
+        isError: false
+      });
+    }
+    if (!effectiveIsFirstOrder && (isPromoApplied('WELCOME76') || isPromoApplied('Welcome76'))) {
+      if (onRemovePromo) {
+        onRemovePromo('WELCOME76');
+        onRemovePromo('Welcome76');
+      }
+      setPromoStatusMsg({
+        code: 'WELCOME76',
+        text: 'Welcome76 is valid only on first order. For your 2nd order onwards, please use FEAT6 (₹1,300 - ₹1,999) or FEAT2.0 (₹2,000+).',
         isError: true
       });
     }
-    if ((currentVal <= 1300 || currentVal > 2000) && isPromoApplied('FEAT6')) {
+    if (currentVal < 2000 && isPromoApplied('FEAT2.0')) {
+      if (onRemovePromo) onRemovePromo('FEAT2.0');
+      setPromoStatusMsg({
+        code: 'FEAT2.0',
+        text: 'FEAT2.0 requires product purchase value of ₹2,000 or over.',
+        isError: true
+      });
+    }
+    if ((currentVal < 1300 || currentVal >= 2000) && isPromoApplied('FEAT6')) {
       if (onRemovePromo) onRemovePromo('FEAT6');
-      if (currentVal > 2000) {
+      if (currentVal >= 2000) {
         setPromoStatusMsg({
           code: 'FEAT6',
-          text: 'Orders over ₹2,000 qualify for FEAT2.0 (₹200 OFF). FEAT6 is not combined.',
+          text: 'Purchases of ₹2,000 or over qualify for FEAT2.0 (₹200 OFF). FEAT6 is not combined.',
           isError: false
         });
       } else {
         setPromoStatusMsg({
           code: 'FEAT6',
-          text: 'FEAT6 requires product purchase value over ₹1,300.',
+          text: 'FEAT6 requires product purchase value between ₹1,300 and ₹1,999.',
           isError: true
         });
       }
@@ -259,7 +322,25 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
         onRemovePromo('FLAT200');
       }
     }
-  }, [effectiveQuantity, product.price]);
+
+    // Category-specific promo cleanup:
+    // If BEAUTIFULYOU is applied but current product is not a Dress Material, auto-remove it
+    if (isPromoApplied('BEAUTIFULYOU') && !isCouponEligibleForProducts('BEAUTIFULYOU', [product])) {
+      if (onRemovePromo) onRemovePromo('BEAUTIFULYOU');
+    }
+    // If GORBO is applied but current product is not a Saree, auto-remove it
+    if (isPromoApplied('GORBO') && !isCouponEligibleForProducts('GORBO', [product])) {
+      if (onRemovePromo) onRemovePromo('GORBO');
+    }
+    // If BHUSWARG is applied but current product is not Firdausi, auto-remove it
+    if (isPromoApplied('BHUSWARG') && !isCouponEligibleForProducts('BHUSWARG', [product])) {
+      if (onRemovePromo) onRemovePromo('BHUSWARG');
+    }
+    // If INDIANA is applied but current product is not a Suit, auto-remove it
+    if (isPromoApplied('INDIANA') && !isCouponEligibleForProducts('INDIANA', [product])) {
+      if (onRemovePromo) onRemovePromo('INDIANA');
+    }
+  }, [effectiveQuantity, product.price, effectiveIsFirstOrder, product]);
 
   const handleToggleProductPromo = async (code: string) => {
     if (!onApplyPromo) return;
@@ -279,6 +360,30 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
       return;
     }
 
+    // Mutual exclusivity and first-order rules
+    if ((clean === 'FEAT6' || clean === 'FEAT2.0') && (effectiveIsFirstOrder || isPromoApplied('WELCOME76') || isPromoApplied('Welcome76'))) {
+      setPromoStatusMsg({ code: clean, text: 'FEAT6 and FEAT2.0 are tier rewards for your 2nd order onwards. On your first order, enjoy Welcome76 (₹76 OFF)!', isError: true });
+      return;
+    }
+    if ((clean === 'WELCOME76' || clean === 'WELCOME 76') && !effectiveIsFirstOrder) {
+      setPromoStatusMsg({ code: clean, text: 'Promo code Welcome76 is valid only on your first order. On your 2nd order onwards, please use FEAT6 (₹1,300 to ₹1,999) or FEAT2.0 (₹2,000 or over).', isError: true });
+      return;
+    }
+    if (clean === 'FEAT6') {
+      const currentVal = product.price * effectiveQuantity;
+      if (currentVal < 1300 || currentVal > 1999) {
+        setPromoStatusMsg({ code: clean, text: 'FEAT6 is applicable only for purchases between ₹1,300 and ₹1,999. For ₹2,000 or over, please use FEAT2.0.', isError: true });
+        return;
+      }
+    }
+    if (clean === 'FEAT2.0') {
+      const currentVal = product.price * effectiveQuantity;
+      if (currentVal < 2000) {
+        setPromoStatusMsg({ code: clean, text: 'FEAT2.0 is applicable only on purchases of ₹2,000 or over.', isError: true });
+        return;
+      }
+    }
+
     // Mutual exclusivity: remove the other milestone coupon
     if (clean === 'FEAT2.0' && isPromoApplied('FEAT6') && onRemovePromo) {
       onRemovePromo('FEAT6');
@@ -286,11 +391,54 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
       onRemovePromo('FEAT2.0');
     }
 
+    // Mutual exclusivity between WELCOME76 and FEAT6
+    if (clean === 'FEAT6' && (isPromoApplied('WELCOME76') || isPromoApplied('Welcome76'))) {
+      setPromoStatusMsg({ code: clean, text: 'FEAT6 cannot be combined with WELCOME76.', isError: true });
+      return;
+    }
+    if ((clean === 'WELCOME76' || clean === 'WELCOME 76') && isPromoApplied('FEAT6')) {
+      setPromoStatusMsg({ code: clean, text: 'WELCOME76 cannot be combined with FEAT6.', isError: true });
+      return;
+    }
+
+    // Remove any coupons that do not apply to this product (e.g. BEAUTIFULYOU when looking at Sarees)
+    if (isPromoApplied('BEAUTIFULYOU') && !isCouponEligibleForProducts('BEAUTIFULYOU', [product]) && onRemovePromo) {
+      onRemovePromo('BEAUTIFULYOU');
+    }
+    if (isPromoApplied('GORBO') && !isCouponEligibleForProducts('GORBO', [product]) && onRemovePromo) {
+      onRemovePromo('GORBO');
+    }
+    if (isPromoApplied('BHUSWARG') && !isCouponEligibleForProducts('BHUSWARG', [product]) && onRemovePromo) {
+      onRemovePromo('BHUSWARG');
+    }
+    if (isPromoApplied('INDIANA') && !isCouponEligibleForProducts('INDIANA', [product]) && onRemovePromo) {
+      onRemovePromo('INDIANA');
+    }
+
+    // Prune ineligible coupons and manage slots
+    const currentVal = product.price * effectiveQuantity;
+    const eligibleApplied = pruneIneligibleCoupons(appliedPromos || [], [product], effectiveIsFirstOrder, currentVal);
+    const newCouponType = getCouponType(clean);
+
+    // If new coupon is milestone, remove other milestone
+    if (newCouponType === 'milestone') {
+      const existingMilestone = eligibleApplied.find(p => getCouponType(p.code) === 'milestone');
+      if (existingMilestone && onRemovePromo) {
+        onRemovePromo(existingMilestone.code);
+      }
+    } else if (newCouponType.startsWith('category_')) {
+      // If user applies another coupon of the same category, replace it
+      const sameCatCoupon = eligibleApplied.find(p => getCouponType(p.code) === newCouponType);
+      if (sameCatCoupon && onRemovePromo) {
+        onRemovePromo(sameCatCoupon.code);
+      }
+    }
+
     setApplyingCode(clean);
     setPromoStatusMsg(null);
     try {
       const currentVal = product.price * effectiveQuantity;
-      const res = await onApplyPromo(clean, currentVal);
+      const res = await onApplyPromo(clean, currentVal, product);
       if (res && !res.valid) {
         setPromoStatusMsg({ code: clean, text: res.message || `Could not apply coupon ${clean}`, isError: true });
       } else {
@@ -442,23 +590,6 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
 
   const handleMainImageError = (e: React.SyntheticEvent<HTMLImageElement, Event>) => {
     const target = e.currentTarget;
-    if (target.src.includes('/api/images/')) {
-      fetchImageFromFirestore(target.src).then((dataUrl) => {
-        if (dataUrl) {
-          target.src = dataUrl;
-          return;
-        }
-        if (target.src !== categoryFallback && !target.src.endsWith(categoryFallback)) {
-          target.src = categoryFallback;
-        }
-      }).catch(() => {
-        if (target.src !== categoryFallback && !target.src.endsWith(categoryFallback)) {
-          target.src = categoryFallback;
-        }
-      });
-      return;
-    }
-
     if (target.src !== categoryFallback && !target.src.endsWith(categoryFallback)) {
       target.src = categoryFallback;
     }
@@ -466,23 +597,6 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
 
   const handleThumbnailError = (e: React.SyntheticEvent<HTMLImageElement, Event>) => {
     const target = e.currentTarget;
-    if (target.src.includes('/api/images/')) {
-      fetchImageFromFirestore(target.src).then((dataUrl) => {
-        if (dataUrl) {
-          target.src = dataUrl;
-          return;
-        }
-        if (target.src !== categoryFallback && !target.src.endsWith(categoryFallback)) {
-          target.src = categoryFallback;
-        }
-      }).catch(() => {
-        if (target.src !== categoryFallback && !target.src.endsWith(categoryFallback)) {
-          target.src = categoryFallback;
-        }
-      });
-      return;
-    }
-
     if (target.src !== categoryFallback && !target.src.endsWith(categoryFallback)) {
       target.src = categoryFallback;
     }
@@ -590,37 +704,6 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
   const isDressMaterialProduct = prodCategory.includes('dress material') || prodName.includes('dress material') || prodName.includes('unstitched');
   const isFirdausiProduct = prodCollection.includes('firdausi') || prodName.includes('firdausi');
 
-  const hasPriorOrders = useMemo(() => {
-    return orders.some(o => {
-      if (o.orderStatus === 'Cancelled' || (o.orderStatus as string) === 'Returned') return false;
-      if (o.paymentStatus === 'Void' || o.paymentStatus === 'Failed') return false;
-      const oid = (o.id || '').toUpperCase();
-      if (oid.startsWith('TEST') || oid.startsWith('DEMO') || oid.includes('MOCK') || oid.includes('DUMMY')) return false;
-      if ((o.finalAmount || 0) <= 10) return false;
-
-      const orderEmail = (o.customerEmail || '').trim().toLowerCase();
-      if (orderEmail.endsWith('@example.com') || orderEmail.includes('mock') || orderEmail.includes('dummy')) return false;
-
-      const userEmail = (currentUser?.email || '').trim().toLowerCase();
-      const orderPhone = (o.deliveryAddress?.phone || '').replace(/\D/g, '');
-      const userPhone = (currentUser?.phone || '').replace(/\D/g, '');
-      const orderUid = o.userId || '';
-      const userUid = currentUser?.uid || '';
-
-      const normOrderPhone = orderPhone.slice(-10);
-      const normUserPhone = userPhone.slice(-10);
-      const phoneMatches = Boolean(
-        normUserPhone.length >= 10 &&
-        normOrderPhone.length >= 10 &&
-        normOrderPhone === normUserPhone
-      );
-
-      return (userEmail && orderEmail && userEmail === orderEmail) ||
-             phoneMatches ||
-             (userUid && orderUid && userUid === orderUid);
-    });
-  }, [orders, currentUser]);
-
   // Product-eligible coupon offers
   interface ProductCouponOffer {
     code: string;
@@ -636,28 +719,32 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
   const eligibleOffers: ProductCouponOffer[] = [];
 
   // Dynamic milestone coupons based on purchase value (price * pieces):
-  // - under 2000 (over 1300): show FEAT6
-  // - over 2000: show FEAT2.0 only, not FEAT6 (do not combine)
-  if (currentPurchaseValue > 2000) {
-    eligibleOffers.push({
-      code: 'FEAT2.0',
-      title: 'Flat ₹200 OFF Orders > ₹2,000',
-      description: 'FEAT2.0 promo code is applicable when billing value is more than 2000 rupees',
-      discountFlat: 200,
-      estimatedSavings: 200,
-      badge: 'FLAT ₹200 OFF',
-      tagColor: 'bg-fuchsia-100 text-fuchsia-900 border-fuchsia-300'
-    });
-  } else if (currentPurchaseValue > 1300) {
-    eligibleOffers.push({
-      code: 'FEAT6',
-      title: '₹60 OFF (Billing ₹1,300 - ₹2,000)',
-      description: 'FEAT6 promo code is applicable when billing value is more than 1300 rupees (valid up to ₹2,000)',
-      discountFlat: 60,
-      estimatedSavings: 60,
-      badge: '₹60 OFF > ₹1.3k',
-      tagColor: 'bg-emerald-100 text-emerald-900 border-emerald-300'
-    });
+  // NOTE: Don't show FEAT6 or FEAT2.0 for first-order shoppers or when WELCOME76 is active.
+  // Returning customers (2nd order onwards):
+  // - ₹1,300 to ₹1,999: show FEAT6
+  // - ₹2,000 or over: show FEAT2.0 only, not FEAT6 (they do not combine)
+  if (!effectiveIsFirstOrder && !isPromoApplied('WELCOME76') && !isPromoApplied('Welcome76')) {
+    if (currentPurchaseValue >= 2000) {
+      eligibleOffers.push({
+        code: 'FEAT2.0',
+        title: 'Flat ₹200 OFF Orders ≥ ₹2,000',
+        description: 'FEAT2.0 promo code is applicable on purchases of ₹2,000 or over',
+        discountFlat: 200,
+        estimatedSavings: 200,
+        badge: 'FLAT ₹200 OFF',
+        tagColor: 'bg-fuchsia-100 text-fuchsia-900 border-fuchsia-300'
+      });
+    } else if (currentPurchaseValue >= 1300 && currentPurchaseValue <= 1999) {
+      eligibleOffers.push({
+        code: 'FEAT6',
+        title: '₹24 OFF (Billing ₹1,300 - ₹1,999)',
+        description: 'FEAT6 promo code is applicable when billing value is between ₹1,300 and ₹1,999',
+        discountFlat: 24,
+        estimatedSavings: 24,
+        badge: '₹24 OFF (₹1.3k - ₹1.99k)',
+        tagColor: 'bg-emerald-100 text-emerald-900 border-emerald-300'
+      });
+    }
   }
 
   // Sarees eligible for GORBO (excluding Firdausi collection)
@@ -667,7 +754,7 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
       title: '5% Extra OFF on Sarees',
       description: 'GORBO for additional 5% discount on Sarees (excluding Firdausi collection)',
       discountPercent: 5,
-      estimatedSavings: Math.round(currentPurchaseValue * 0.05),
+      estimatedSavings: Number((currentPurchaseValue * 0.05).toFixed(2)),
       badge: '5% SAREES (NON-FIRDAUSI)',
       tagColor: 'bg-amber-100 text-amber-900 border-amber-300'
     });
@@ -679,7 +766,7 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
       title: '2% Extra OFF on Suit & Indo-Western Sets',
       description: 'INDIANA for additional 2% Off only on choosing Suit Set and Indo-Western set',
       discountPercent: 2,
-      estimatedSavings: Math.round(currentPurchaseValue * 0.02),
+      estimatedSavings: Number((currentPurchaseValue * 0.02).toFixed(2)),
       badge: '2% SUIT & INDO-WESTERN',
       tagColor: 'bg-blue-100 text-blue-900 border-blue-300'
     });
@@ -691,7 +778,7 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
       title: '4% Extra OFF on Dress Materials',
       description: 'BEAUTIFULYOU for additional discount of 4% only on dress materials',
       discountPercent: 4,
-      estimatedSavings: Math.round(currentPurchaseValue * 0.04),
+      estimatedSavings: Number((currentPurchaseValue * 0.04).toFixed(2)),
       badge: '4% DRESS MATERIALS',
       tagColor: 'bg-purple-100 text-purple-900 border-purple-300'
     });
@@ -704,13 +791,13 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
       title: '6% Extra OFF on Firdausi Collection',
       description: 'BHUSWARG for additional 6% discount on Firdausi collection',
       discountPercent: 6,
-      estimatedSavings: Math.round(currentPurchaseValue * 0.06),
+      estimatedSavings: Number((currentPurchaseValue * 0.06).toFixed(2)),
       badge: '6% FIRDAUSI COLLECTION',
       tagColor: 'bg-rose-100 text-rose-900 border-rose-300'
     });
   }
 
-  if (!hasPriorOrders) {
+  if (effectiveIsFirstOrder) {
     eligibleOffers.push({
       code: 'Welcome76',
       title: 'Flat ₹76 OFF 1st Order',
@@ -773,39 +860,51 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
       type: 'collection'
     });
   }
-  if (currentPurchaseValue <= 1300) {
-    const needMore = 1300 - currentPurchaseValue + 1;
+
+  if (!effectiveIsFirstOrder && !isPromoApplied('WELCOME76') && !isPromoApplied('Welcome76')) {
+    if (currentPurchaseValue < 1300) {
+      const needMore = Math.max(0, 1300 - currentPurchaseValue + 1);
+      otherMarketedOffers.push({
+        code: 'FEAT6',
+        title: 'Order Discount (Billing ₹1,300 - ₹1,999)',
+        discountDesc: `FEAT6 (₹24 OFF) unlocks at ₹1,300 (Add ₹${(needMore || 0).toLocaleString('en-IN')} more to unlock)`,
+        targetName: 'All',
+        buttonLabel: 'Add More Pieces',
+        type: 'cart'
+      });
+    } else if (currentPurchaseValue >= 1300 && currentPurchaseValue <= 1999) {
+      const needMore = Math.max(0, 2000 - currentPurchaseValue + 1);
+      otherMarketedOffers.push({
+        code: 'FEAT2.0',
+        title: 'Grand Milestone (≥ ₹2,000)',
+        discountDesc: `FEAT2.0 (Flat ₹200 OFF) unlocks at ₹2,000 (Add ₹${(needMore || 0).toLocaleString('en-IN')} more to unlock)`,
+        targetName: 'All',
+        buttonLabel: 'Add More Pieces',
+        type: 'cart'
+      });
+    }
+  } else if (effectiveIsFirstOrder && !isPromoApplied('WELCOME76') && !isPromoApplied('Welcome76')) {
     otherMarketedOffers.push({
-      code: 'FEAT6',
-      title: 'Order Discount (Billing > ₹1,300)',
-      discountDesc: `FEAT6 (₹60 OFF) unlocks over ₹1,300 (Add ₹${needMore.toLocaleString('en-IN')} more to unlock)`,
-      targetName: 'All',
-      buttonLabel: 'Add More Pieces',
-      type: 'cart'
-    });
-  } else if (currentPurchaseValue <= 2000) {
-    const needMore = 2000 - currentPurchaseValue + 1;
-    otherMarketedOffers.push({
-      code: 'FEAT2.0',
-      title: 'Grand Discount (> ₹2,000)',
-      discountDesc: `FEAT2.0 (Flat ₹200 OFF) unlocks over ₹2,000 (Add ₹${needMore.toLocaleString('en-IN')} more to unlock)`,
-      targetName: 'All',
-      buttonLabel: 'Add More Pieces',
+      code: 'Welcome76',
+      title: 'First Order Gift',
+      discountDesc: 'Use code Welcome76 for Flat ₹76 OFF on your first purchase!',
+      targetName: 'Welcome',
+      buttonLabel: 'Apply Welcome76',
       type: 'cart'
     });
   }
 
   // Current pricing based on pieces / quantity selected
   const isMultiplePieces = effectiveQuantity > 1;
-  const currentTotalBasePrice = product.price * effectiveQuantity;
-  const currentTotalOriginalPrice = product.originalPrice * effectiveQuantity;
+  const currentTotalBasePrice = (product.price || 0) * effectiveQuantity;
+  const currentTotalOriginalPrice = (product.originalPrice || product.price || 0) * effectiveQuantity;
 
   // Product price calculations taking into account stacked applied promos
-  const totalAppliedPromoDiscount = effectiveAppliedPromos.reduce((sum, p) => sum + p.discount, 0);
+  const totalAppliedPromoDiscount = Number(effectiveAppliedPromos.reduce((sum, p) => sum + (p.discount || 0), 0).toFixed(2));
   const maxSafeDiscount = Math.max(0, currentTotalBasePrice - 1);
-  const cappedPromoDiscount = Math.min(totalAppliedPromoDiscount, maxSafeDiscount);
-  const finalEffectivePrice = Math.max(1, currentTotalBasePrice - cappedPromoDiscount);
-  const totalSavings = currentTotalOriginalPrice - finalEffectivePrice;
+  const cappedPromoDiscount = Number(Math.min(totalAppliedPromoDiscount, maxSafeDiscount).toFixed(2));
+  const finalEffectivePrice = Number(Math.max(1, currentTotalBasePrice - cappedPromoDiscount).toFixed(2));
+  const totalSavings = Number((currentTotalOriginalPrice - finalEffectivePrice).toFixed(2));
 
   return (
     <div className={`min-h-screen py-4 sm:py-8 px-3 sm:px-6 animate-in fade-in duration-200 ${
@@ -1010,13 +1109,13 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
                     <>
                       <div className="flex items-baseline gap-2">
                         <span className="text-2xl sm:text-3xl font-black text-emerald-800">
-                          ₹{finalEffectivePrice.toLocaleString('en-IN')}
+                          ₹{(finalEffectivePrice || 0).toLocaleString('en-IN')}
                         </span>
                         <span className="text-sm sm:text-base text-gray-500 line-through">
-                          ₹{currentTotalBasePrice.toLocaleString('en-IN')}
+                          ₹{(currentTotalBasePrice || 0).toLocaleString('en-IN')}
                         </span>
                         <span className="text-xs sm:text-sm text-gray-400 line-through">
-                          MRP ₹{currentTotalOriginalPrice.toLocaleString('en-IN')}
+                          MRP ₹{(currentTotalOriginalPrice || 0).toLocaleString('en-IN')}
                         </span>
                       </div>
                       {isMultiplePieces && (
@@ -1025,17 +1124,17 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
                         </span>
                       )}
                       <span className="text-xs font-bold text-emerald-800 bg-emerald-100 px-2.5 py-1 rounded-md ml-auto">
-                        Save ₹{totalSavings.toLocaleString('en-IN')} (incl. ₹{cappedPromoDiscount.toLocaleString('en-IN')} stacked coupons)
+                        Save ₹{(totalSavings || 0).toLocaleString('en-IN')} (incl. ₹{(cappedPromoDiscount || 0).toLocaleString('en-IN')} stacked coupons)
                       </span>
                     </>
                   ) : (
                     <>
                       <div className="flex items-baseline gap-2">
                         <span className={`text-2xl sm:text-3xl font-black ${isSaree ? 'text-amber-950 font-serif' : 'text-pink-950'}`}>
-                          ₹{currentTotalBasePrice.toLocaleString('en-IN')}
+                          ₹{(currentTotalBasePrice || 0).toLocaleString('en-IN')}
                         </span>
                         <span className="text-sm sm:text-base text-gray-400 line-through">
-                          MRP ₹{currentTotalOriginalPrice.toLocaleString('en-IN')}
+                          MRP ₹{(currentTotalOriginalPrice || 0).toLocaleString('en-IN')}
                         </span>
                       </div>
                       <span className={`text-xs font-black px-2.5 py-1 rounded-lg border shadow-sm ${
@@ -1051,7 +1150,7 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
                         </span>
                       )}
                       <span className="text-xs font-bold text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded-md ml-auto">
-                        Save ₹{(currentTotalOriginalPrice - currentTotalBasePrice).toLocaleString('en-IN')}
+                        Save ₹{((currentTotalOriginalPrice - currentTotalBasePrice) || 0).toLocaleString('en-IN')}
                       </span>
                     </>
                   )}
@@ -1071,7 +1170,7 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
                           className="inline-flex items-center gap-1 text-[10px] font-mono font-black bg-emerald-700 text-white px-2 py-0.5 rounded-md shadow-2xs"
                         >
                           <span>{p.code}</span>
-                          <span className="opacity-80">(-₹{p.discount.toLocaleString('en-IN')})</span>
+                          <span className="opacity-80">(-₹{(p.discount || 0).toLocaleString('en-IN')})</span>
                           {onRemovePromo && (
                             <button
                               type="button"
@@ -1213,7 +1312,7 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
                             {offer.title}
                           </p>
                           <p className="text-[11px] text-gray-600">
-                            {offer.description} • Save ~₹{offer.estimatedSavings.toLocaleString('en-IN')} on this item!
+                            {offer.description} • Save ~₹{(offer.estimatedSavings || 0).toLocaleString('en-IN')} on this item!
                           </p>
                         </div>
 
@@ -1224,7 +1323,7 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
                               <span>Applied</span>
                               {appliedObj && (
                                 <span className="text-[10px] text-emerald-800 font-bold">
-                                  (-₹{appliedObj.discount.toLocaleString('en-IN')})
+                                  (-₹{(appliedObj.discount || 0).toLocaleString('en-IN')})
                                 </span>
                               )}
                               {onRemovePromo && (
@@ -1270,10 +1369,10 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
                         </span>
                       </div>
                       <p className="text-xs font-black text-gray-900 leading-tight">
-                        Flat ₹55 off on prepaid orders
+                        Flat ₹55 off on prepaid orders (Not a Promo Code)
                       </p>
                       <p className="text-[11px] text-gray-600">
-                        Flat discount of ₹55 on all prepaid UPI/Card orders. Stacks on top of all applied promo codes!
+                        Automatic ₹55 discount on all prepaid UPI/Card orders. Stacks freely with promo codes like GORBO, BHUSWARG, BEAUTIFULYOU!
                       </p>
                     </div>
 
@@ -1712,7 +1811,7 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
                     <span>Select Pieces / Quantity:</span>
                   </span>
                   <span className="text-[11px] font-extrabold text-pink-900 bg-white px-2.5 py-0.5 rounded-lg border border-pink-200 shadow-2xs">
-                    {effectiveQuantity} {effectiveQuantity === 1 ? 'Piece' : 'Pieces'} • Total: ₹{finalEffectivePrice.toLocaleString('en-IN')}
+                    {effectiveQuantity} {effectiveQuantity === 1 ? 'Piece' : 'Pieces'} • Total: ₹{(finalEffectivePrice || 0).toLocaleString('en-IN')}
                   </span>
                 </div>
 
@@ -1791,8 +1890,8 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
                       : isSelectedSizeOutOfStock
                       ? `Size ${selectedSize} Out of stock`
                       : effectiveQuantity > 1
-                      ? `ADD ${effectiveQuantity} PIECES • ₹${finalEffectivePrice.toLocaleString('en-IN')}`
-                      : `ADD TO CART • ₹${finalEffectivePrice.toLocaleString('en-IN')}`}
+                      ? `ADD ${effectiveQuantity} PIECES • ₹${(finalEffectivePrice || 0).toLocaleString('en-IN')}`
+                      : `ADD TO CART • ₹${(finalEffectivePrice || 0).toLocaleString('en-IN')}`}
                   </span>
                 </button>
 
@@ -1819,7 +1918,7 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
                       : isSelectedSizeOutOfStock
                       ? `Size ${selectedSize} Out of stock`
                       : effectiveQuantity > 1
-                      ? `BUY ${effectiveQuantity} PIECES • ₹${finalEffectivePrice.toLocaleString('en-IN')}`
+                      ? `BUY ${effectiveQuantity} PIECES • ₹${(finalEffectivePrice || 0).toLocaleString('en-IN')}`
                       : 'BUY NOW'}
                   </span>
                 </button>

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Mail, Lock, User, ArrowRight, AlertCircle, CheckCircle2, ShieldCheck } from 'lucide-react';
+import { X, Mail, Lock, User, ArrowRight, AlertCircle, CheckCircle2, ShieldCheck, Gift, Sparkles } from 'lucide-react';
 import { 
   auth, 
   signInWithGoogle, 
@@ -11,6 +11,8 @@ import {
 } from '../firebase';
 import { doc, setDoc, getDoc } from 'firebase/firestore';
 import { isSilentAuthCancellation, getCleanAuthErrorMessage } from '../utils/authErrors';
+import { getPendingReferralCode, linkReferralCode } from '../services/referralService';
+import { triggerFeatherAnimation } from './FloatingFeatherAnimation';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -25,6 +27,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [fullName, setFullName] = useState('');
+  const [referralCode, setReferralCode] = useState(() => getPendingReferralCode() || '');
+  const [showReferralInput, setShowReferralInput] = useState(() => Boolean(getPendingReferralCode()));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
@@ -37,6 +41,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
     setEmail('');
     setPassword('');
     setFullName('');
+    setReferralCode(getPendingReferralCode() || '');
   };
 
   const handleSwitchMode = (newMode: 'signin' | 'signup' | 'forgot') => {
@@ -51,12 +56,31 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
     try {
       const user = await signInWithGoogle();
       if (user) {
-        setSuccessMessage(`Welcome back, ${user.displayName || 'Valued Visitor'}!`);
+        const pendingRef = getPendingReferralCode();
+        let bonusCredited = false;
+        if (pendingRef) {
+          try {
+            const linkRes = await linkReferralCode(user.uid, user.email || '', pendingRef);
+            if (linkRes.success && (linkRes.feathersAwarded || 0) > 0) {
+              bonusCredited = true;
+              triggerFeatherAnimation({
+                featherCount: 25,
+                durationMs: 3500,
+                label: '✨ +40 Magic Feathers (₹20 OFF) Credited! ✨'
+              });
+            }
+          } catch (_) {}
+        }
+
+        setSuccessMessage(bonusCredited
+          ? `Welcome to Feat! 40 Magic Feathers (₹20 OFF) credited for your orders!`
+          : `Welcome back, ${user.displayName || 'Valued Visitor'}!`
+        );
         setTimeout(() => {
           if (onSuccess) onSuccess(user);
           onClose();
           resetState();
-        }, 1200);
+        }, 1300);
       }
       // If user is null (popup was closed/cancelled by user), do nothing cleanly without displaying any error banner
     } catch (err: any) {
@@ -100,6 +124,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
           return;
         }
 
+        const cleanRef = (referralCode || getPendingReferralCode() || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+
         const userCredential = await createUserWithEmailAndPassword(auth, email, password);
         const user = userCredential.user;
 
@@ -111,8 +137,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
           if (userDb) {
             await setDoc(doc(userDb, 'users', user.uid), {
               uid: user.uid,
-              email: user.email,
+              email: user.email || '',
               displayName: fullName,
+              referredByCode: cleanRef || null,
               createdAt: new Date().toISOString(),
               provider: 'password'
             }, { merge: true });
@@ -121,12 +148,31 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
           console.log('Firestore user doc write notice:', dbErr);
         }
 
-        setSuccessMessage(`Account created successfully! Welcome to Feat, ${fullName}.`);
+        // Link referral code to credit ₹20 worth of magic feathers (40 feathers)
+        let bonusCredited = false;
+        if (cleanRef) {
+          try {
+            const linkRes = await linkReferralCode(user.uid, user.email || '', cleanRef);
+            if (linkRes.success && (linkRes.feathersAwarded || 0) > 0) {
+              bonusCredited = true;
+              triggerFeatherAnimation({
+                featherCount: 25,
+                durationMs: 3500,
+                label: '✨ +40 Magic Feathers (₹20 OFF) Credited! ✨'
+              });
+            }
+          } catch (_) {}
+        }
+
+        setSuccessMessage(bonusCredited
+          ? `Account created! You received 40 Magic Feathers worth ₹20 to use for discounts on any order!`
+          : `Account created successfully! Welcome to Feat, ${fullName}.`
+        );
         setTimeout(() => {
           if (onSuccess) onSuccess(user);
           onClose();
           resetState();
-        }, 1200);
+        }, 1400);
       } else if (mode === 'forgot') {
         if (!email.trim()) {
           setError('Please enter your registered email address');
@@ -351,6 +397,35 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
                     className="w-full pl-9 pr-3 py-2 text-xs border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-pink-700 font-medium"
                   />
                 </div>
+              </div>
+            )}
+
+            {/* Referral Code Field (Optional - Grants ₹20 Magic Feathers!) */}
+            {mode === 'signup' && (
+              <div className="bg-amber-50/70 border border-amber-200/80 rounded-2xl p-3 space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="flex items-center gap-1.5 text-xs font-bold text-amber-950">
+                    <Gift className="w-3.5 h-3.5 text-amber-600" />
+                    <span>Have a Referral Code?</span>
+                  </label>
+                  <span className="text-[10px] font-black text-amber-700 bg-amber-100/90 border border-amber-300/60 px-2 py-0.5 rounded-full flex items-center gap-1">
+                    <Sparkles className="w-3 h-3 text-amber-600" />
+                    Get ₹20 Off
+                  </span>
+                </div>
+
+                <div className="relative flex items-center">
+                  <input
+                    type="text"
+                    value={referralCode}
+                    onChange={(e) => setReferralCode(e.target.value.toUpperCase())}
+                    placeholder="e.g. FRIEND20"
+                    className="w-full uppercase font-mono text-xs px-3 py-1.5 bg-white border border-amber-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold tracking-wider text-gray-900 placeholder:normal-case placeholder:font-sans placeholder:font-normal placeholder:tracking-normal"
+                  />
+                </div>
+                <p className="text-[10px] text-amber-800 leading-tight">
+                  🎁 Sign up using anyone's referral code to instantly receive <strong>40 Magic Feathers (₹20 discount)</strong> to spend on any order!
+                </p>
               </div>
             )}
 

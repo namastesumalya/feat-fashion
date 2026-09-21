@@ -2,12 +2,14 @@ import React from 'react';
 
 export interface MagicFeatherSvgProps {
   className?: string;
+  style?: React.CSSProperties;
 }
 
-export function MagicFeatherSvg({ className = 'w-4 h-4' }: MagicFeatherSvgProps) {
+export function MagicFeatherSvg({ className = 'w-4 h-4', style }: MagicFeatherSvgProps) {
   return (
     <svg 
-      className={className} 
+      className={className}
+      style={style} 
       viewBox="0 0 24 24" 
       fill="none" 
       stroke="currentColor" 

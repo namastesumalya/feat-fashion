@@ -114,9 +114,9 @@ export const WishlistDrawer: React.FC<WishlistDrawerProps> = ({
                       </p>
 
                       <div className="flex items-baseline gap-1.5 mt-1">
-                        <span className="font-extrabold text-xs text-pink-950">₹{product.price.toLocaleString()}</span>
-                        {product.originalPrice > product.price && (
-                          <span className="text-[10px] text-gray-400 line-through">₹{product.originalPrice.toLocaleString()}</span>
+                        <span className="font-extrabold text-xs text-pink-950">₹{(product.price ?? 0).toLocaleString('en-IN')}</span>
+                        {product.originalPrice !== undefined && product.originalPrice > (product.price ?? 0) && (
+                          <span className="text-[10px] text-gray-400 line-through">₹{(product.originalPrice ?? product.price ?? 0).toLocaleString('en-IN')}</span>
                         )}
                       </div>
                     </div>

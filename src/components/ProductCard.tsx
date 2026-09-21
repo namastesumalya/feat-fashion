@@ -2,7 +2,6 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { Star, Heart, ShoppingBag, AlertCircle } from 'lucide-react';
 import { Product } from '../types';
 import { getProductMainImage, getCategoryFallbackImage } from '../utils/productImage';
-import { fetchImageFromFirestore } from '../firebaseAdmin';
 
 interface ProductCardProps {
   product: Product;
@@ -44,44 +43,10 @@ export const ProductCard: React.FC<ProductCardProps> = ({
     setCardImage(initialImg);
     setImageFailed(false);
     setRetryCount(0);
-
-    // If initial image is an /api/images/ path, attempt to resolve it from Admin Firestore in background
-    if (initialImg.startsWith('/api/images/')) {
-      fetchImageFromFirestore(initialImg).then((dataUrl) => {
-        if (dataUrl) setCardImage(dataUrl);
-      }).catch(() => {});
-    }
   }, [product.id, product.images, product.colorVariants, (product as any).image]);
 
   const handleImageError = () => {
-    // If the image was an /api/images/ URL, try resolving directly from Firestore database
-    if (cardImage.startsWith('/api/images/')) {
-      fetchImageFromFirestore(cardImage).then((dataUrl) => {
-        if (dataUrl) {
-          setCardImage(dataUrl);
-          return;
-        }
-        if (!imageFailed && cardImage !== categoryFallback) {
-          setImageFailed(true);
-          setCardImage(categoryFallback);
-        }
-      }).catch(() => {
-        if (!imageFailed && cardImage !== categoryFallback) {
-          setImageFailed(true);
-          setCardImage(categoryFallback);
-        }
-      });
-      return;
-    }
-
-    // If external URL failed to load, retry once with cache buster if not a data URL
-    if (retryCount < 1 && cardImage && !cardImage.startsWith('/') && !cardImage.startsWith('data:')) {
-      setRetryCount(prev => prev + 1);
-      const separator = cardImage.includes('?') ? '&' : '?';
-      setCardImage(`${cardImage}${separator}_retry=${retryCount + 1}`);
-      return;
-    }
-
+    // If image fails, fallback to category fallback smoothly
     if (!imageFailed && cardImage !== categoryFallback) {
       setImageFailed(true);
       setCardImage(categoryFallback);
@@ -302,11 +267,13 @@ export const ProductCard: React.FC<ProductCardProps> = ({
           {/* Pricing Row */}
           <div className="flex items-baseline gap-2">
             <span className="text-base sm:text-lg font-black text-black">
-              ₹{product.price.toLocaleString('en-IN')}
+              ₹{(product.price ?? 0).toLocaleString('en-IN')}
             </span>
-            <span className="text-xs text-gray-400 line-through">
-              ₹{product.originalPrice.toLocaleString('en-IN')}
-            </span>
+            {(product.originalPrice !== undefined && product.originalPrice !== null) && (
+              <span className="text-xs text-gray-400 line-through">
+                ₹{(product.originalPrice ?? product.price ?? 0).toLocaleString('en-IN')}
+              </span>
+            )}
           </div>
 
           {/* Action Button: Yellow Background */}
@@ -315,7 +282,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({
               e.stopPropagation();
               if (!isOutOfStock) {
                 const defaultColor = variants.length > 1 ? variants[0].name : undefined;
-                const defaultSize = (product.sizes || []).find(sz => (product.sizeStock?.[sz] !== undefined ? product.sizeStock[sz] > 0 : true)) || product.sizes[0] || 'Free Size';
+                const defaultSize = (product.sizes || []).find(sz => (product.sizeStock?.[sz] !== undefined ? product.sizeStock[sz] > 0 : true)) || product.sizes?.[0] || 'Free Size';
                 onAddToCart(product, defaultSize, e, defaultColor);
               }
             }}

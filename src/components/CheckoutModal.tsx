@@ -13,6 +13,7 @@ import { getColorHex } from '../utils/colors';
 import { CustomAlertModal, AlertModalState } from './CustomAlertModal';
 import { logPaymentFailureToFirestore, db, userDb } from '../firebase';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { sanitizeForFirestore } from '../firebaseAdmin';
 import { getShiprocketDeliveryEstimate, computeFallbackEstimate } from '../utils/deliveryEstimation';
 import { getItemVariantImage, getCategoryFallbackImage } from '../utils/productImage';
 import { getUserReferralProfile, getPendingReferralCode, savePendingReferralCode, feathersToRupees, FEATHER_RUPEE_VALUE } from '../services/referralService';
@@ -513,12 +514,12 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
       if (currentUser?.uid && userDb) {
         try {
           const userDocRef = doc(userDb, 'users', currentUser.uid);
-          await setDoc(userDocRef, {
+          await setDoc(userDocRef, sanitizeForFirestore({
             savedAddresses: updatedList,
             defaultAddress: normalizedAddr,
             email: emailToSave || currentUser.email || '',
             lastUpdated: new Date().toISOString()
-          }, { merge: true });
+          }), { merge: true });
         } catch (cErr) {
           console.warn('[Firestore Sync] Address sync notice:', cErr);
         }
@@ -740,6 +741,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
       }
 
       let activeRzpOrderId = '';
+      let isLiveOrder = false;
       let activeKeyId = import.meta.env.VITE_RAZORPAY_KEY_ID || 'rzp_live_TW2OaZD6oLmiqp';
 
       try {
@@ -772,7 +774,8 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
           });
           return;
         }
-        activeRzpOrderId = rzpData.orderId || rzpData.id || '';
+        activeRzpOrderId = rzpData.orderId || '';
+        const isLiveOrder = Boolean(rzpData.isLive && activeRzpOrderId && !activeRzpOrderId.startsWith('FEAT_'));
         if (rzpData.keyId) {
           activeKeyId = rzpData.keyId;
         }
@@ -860,7 +863,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
         }
       };
 
-      if (activeRzpOrderId) {
+      if (activeRzpOrderId && isLiveOrder) {
         options.order_id = activeRzpOrderId;
       }
 
@@ -890,7 +893,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
       const elapsed = paymentSessionSeconds;
       setIsPaymentSessionActive(false);
       setIsRazorpayLoading(false);
-      console.error('Razorpay popup launch error:', err);
+      console.warn('Razorpay popup launch notice:', err?.message || err);
       const parsed = {
         title: 'Gateway Connection Failed',
         description: err?.message || 'Could not connect to Razorpay secure checkout servers.',
@@ -966,7 +969,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
       }
       setStep('success');
     } catch (err: any) {
-      console.error('Order processing error:', err);
+      console.warn('Order processing notice:', err?.message || err);
       setStep('checkout');
       showAlert(err.message || 'Could not place order due to an inventory verification error.', 'error', 'Order Verification Failed');
     }
@@ -1094,7 +1097,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                           <div className="flex items-center justify-between mt-1.5">
                             <div className="flex items-baseline gap-1.5">
                               <span className="text-xs font-extrabold text-gray-900">
-                                ₹{(item.product.price * item.quantity).toLocaleString('en-IN')}
+                                ₹{(((item.product?.price ?? 0) * (item.quantity || 1))).toLocaleString('en-IN')}
                               </span>
                               {item.quantity > 1 && (
                                 <span className="text-[10px] font-bold text-pink-700 bg-pink-50 px-1.5 py-0.5 rounded border border-pink-200">
@@ -1531,11 +1534,11 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
               <div className="border border-pink-200 rounded-2xl p-3.5 bg-gradient-to-br from-pink-50/40 to-amber-50/30 space-y-2 text-xs">
                 <div className="flex justify-between items-center text-gray-600">
                   <span>Total MRP</span>
-                  <span>₹{totalMrp.toLocaleString('en-IN')}</span>
+                  <span>₹{(totalMrp ?? 0).toLocaleString('en-IN')}</span>
                 </div>
                 <div className="flex justify-between items-center text-emerald-700 font-bold">
                   <span>Product Discount</span>
-                  <span>-₹{totalDiscount.toLocaleString('en-IN')}</span>
+                  <span>-₹{(totalDiscount ?? 0).toLocaleString('en-IN')}</span>
                 </div>
 
                 {appliedPromo && (
@@ -1586,7 +1589,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                         ...(subtotal > 2000 
                           ? [{ code: 'FEAT2.0', label: 'FEAT2.0 (₹200 OFF)' }] 
                           : subtotal > 1300 
-                          ? [{ code: 'FEAT6', label: 'FEAT6 (₹60 OFF)' }] 
+                          ? [{ code: 'FEAT6', label: 'FEAT6 (₹24 OFF)' }] 
                           : []),
                         { code: 'Welcome76', label: 'Welcome76 (₹76 OFF)' }
                       ].map(item => (
@@ -1627,7 +1630,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                 <div className="border-t border-pink-200 pt-2 flex justify-between items-center text-base font-black text-pink-950 font-serif">
                   <span>Total Payable</span>
                   <div className="text-right">
-                    <span>₹{finalPayable.toLocaleString('en-IN')}</span>
+                    <span>₹{(finalPayable ?? 0).toLocaleString('en-IN')}</span>
                     <span className="text-[10px] text-gray-500 font-sans block font-normal">
                       Incl. 5% GST &amp; Free Insurance
                     </span>
@@ -1880,7 +1883,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                   <span>
                     {isRazorpayLoading
                       ? 'Opening Razorpay Gateway...'
-                      : `Proceed to Pay ₹${finalPayable.toLocaleString('en-IN')} (Razorpay)`}
+                      : `Proceed to Pay ₹${(finalPayable ?? 0).toLocaleString('en-IN')} (Razorpay)`}
                   </span>
                 </button>
 
@@ -1997,7 +2000,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
 
                 <div className="border-t border-purple-200/80 pt-2 flex justify-between font-black text-purple-950">
                   <span>Amount Paid (Incl. 5% GST):</span>
-                  <span>₹{(confirmedAmount > 0 ? confirmedAmount : finalPayable).toLocaleString('en-IN')}</span>
+                  <span>₹{((confirmedAmount > 0 ? confirmedAmount : finalPayable) ?? 0).toLocaleString('en-IN')}</span>
                 </div>
 
                 <div className="pt-1 text-[10px] text-gray-500 flex items-center justify-between">

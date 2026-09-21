@@ -30,10 +30,10 @@ export const INITIAL_PROMOS: PromoCode[] = [
     code: 'FEAT6',
     name: 'Order Savings (> ₹1,300)',
     discountType: 'flat',
-    discountValue: 60,
+    discountValue: 24,
     minOrderValue: 1300,
-    description: 'FEAT6 - ₹60 off on purchase over ₹1,300',
-    reasonForSale: 'Flat ₹60 off on purchase over ₹1,300',
+    description: 'FEAT6 - ₹24 off on purchase over ₹1,300',
+    reasonForSale: 'Flat ₹24 off on purchase over ₹1,300',
     active: true
   },
   {

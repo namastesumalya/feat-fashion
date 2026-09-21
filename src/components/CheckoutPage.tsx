@@ -14,9 +14,16 @@ import { getColorHex } from '../utils/colors';
 import { CustomAlertModal, AlertModalState } from './CustomAlertModal';
 import { logPaymentFailureToFirestore, userDb } from '../firebase';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { sanitizeForFirestore } from '../firebaseAdmin';
 import { getShiprocketDeliveryEstimate, computeFallbackEstimate } from '../utils/deliveryEstimation';
 import { getItemVariantImage, getCategoryFallbackImage } from '../utils/productImage';
 import { CouponMilestonesCard } from './CouponMilestonesCard';
+import { 
+  getUserReferralProfile, 
+  FEATHER_RUPEE_VALUE, 
+  feathersToRupees, 
+  MagicFeatherSvg 
+} from '../services/referralService';
 
 export const sanitizeIndianPhone = (raw: string | undefined | null): string => {
   if (!raw) return '';
@@ -43,6 +50,7 @@ interface CheckoutPageProps {
   promos?: PromoCode[];
   onExploreCategory?: (category: string) => void;
   onExploreCollection?: (collection: string) => void;
+  isFirstOrder?: boolean;
   onCompleteOrder: (orderData: {
     orderId?: string;
     deliveryAddress: DeliveryAddress;
@@ -53,6 +61,8 @@ interface CheckoutPageProps {
     razorpayOrderId?: string;
     razorpayPaymentId?: string;
     razorpaySignature?: string;
+    feathersUsed?: number;
+    feathersDiscount?: number;
   }) => Promise<any>;
 }
 
@@ -70,6 +80,7 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({
   promos = [],
   onExploreCategory,
   onExploreCollection,
+  isFirstOrder = false,
   onCompleteOrder
 }) => {
   const [step, setStep] = useState<'checkout' | 'processing' | 'success'>('checkout');
@@ -348,6 +359,28 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({
     }
   }, [cartItems, confirmedOrderId, orderRef]);
 
+  // Magic Feathers Loyalty & Referral Discount State
+  const [availableFeathers, setAvailableFeathers] = useState(0);
+  const [useMagicFeathers, setUseMagicFeathers] = useState(false);
+
+  useEffect(() => {
+    let isMounted = true;
+    const fetchFeathers = async () => {
+      try {
+        const uid = currentUser?.uid || '';
+        const email = customerEmail || currentUser?.email || '';
+        if (uid || email) {
+          const profile = await getUserReferralProfile(uid, email);
+          if (isMounted) {
+            setAvailableFeathers(profile.availableFeathers || 0);
+          }
+        }
+      } catch (_) {}
+    };
+    fetchFeathers();
+    return () => { isMounted = false; };
+  }, [customerEmail, currentUser]);
+
   // Price & GST Calculations
   const totalMrp = cartItems.reduce((acc, item) => acc + (Number(item.product.originalPrice) || Number(item.product.price)) * item.quantity, 0);
   const totalDiscount = cartItems.reduce((acc, item) => acc + (Math.max(0, (Number(item.product.originalPrice) || Number(item.product.price)) - Number(item.product.price))) * item.quantity, 0);
@@ -355,16 +388,23 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({
   const effectiveAppliedPromos = (appliedPromos && appliedPromos.length > 0)
     ? appliedPromos
     : (appliedPromo ? [appliedPromo] : []);
-  const couponDiscount = Math.min(
+  const couponDiscount = Number(Math.min(
     Math.max(0, subtotal - 1),
     effectiveAppliedPromos.reduce((sum, p) => sum + p.discount, 0)
-  );
+  ).toFixed(2));
   // Flat discount of 55 rupees on all prepaid orders, no promo code required, but COD orders will not get this discount
   const isPrepaid = paymentMethod !== 'COD';
-  const prepaidDiscount = (isPrepaid && (subtotal - couponDiscount) > 55) ? 55 : 0;
+  const prepaidDiscount = (isPrepaid && subtotal > 0) ? 55 : 0;
+
+  // Magic Feathers Extra Discount (1 feather = 50 paisa = ₹0.50)
+  const remainingBeforeFeathers = Math.max(0, subtotal - couponDiscount - prepaidDiscount);
+  const maxPossibleFeatherDiscount = availableFeathers * FEATHER_RUPEE_VALUE;
+  const feathersDiscount = useMagicFeathers ? Math.min(maxPossibleFeatherDiscount, remainingBeforeFeathers) : 0;
+  const feathersUsed = useMagicFeathers ? Math.round(feathersDiscount / FEATHER_RUPEE_VALUE) : 0;
+
   // 100% Free delivery nationwide on all orders (no shipping charges)
   const deliveryFee = 0;
-  const finalPayable = Math.max(subtotal > 0 ? 1 : 0, subtotal - couponDiscount - prepaidDiscount + deliveryFee);
+  const finalPayable = Number(Math.max(0, subtotal - couponDiscount - prepaidDiscount - feathersDiscount + deliveryFee).toFixed(2));
 
   const getItemImage = (item: CartItem) => {
     return getItemVariantImage(item.product, item.selectedColor);
@@ -530,12 +570,12 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({
       if (currentUser?.uid && userDb) {
         try {
           const userDocRef = doc(userDb, 'users', currentUser.uid);
-          await setDoc(userDocRef, {
+          await setDoc(userDocRef, sanitizeForFirestore({
             savedAddresses: updatedList,
             defaultAddress: normalizedAddr,
             email: emailToSave || currentUser.email || '',
             lastUpdated: new Date().toISOString()
-          }, { merge: true });
+          }), { merge: true });
         } catch (cErr) {
           console.warn('[Firestore Sync] Address sync notice:', cErr);
         }
@@ -809,6 +849,7 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({
       }
 
       let activeRzpOrderId = '';
+      let isLiveOrder = false;
       let activeKeyId = import.meta.env.VITE_RAZORPAY_KEY_ID || 'rzp_live_TW2OaZD6oLmiqp';
 
       try {
@@ -852,6 +893,7 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({
           return;
         }
         activeRzpOrderId = rzpData.orderId || rzpData.id || '';
+        isLiveOrder = Boolean(rzpData.isLive && activeRzpOrderId && !activeRzpOrderId.startsWith('FEAT_'));
         if (rzpData.keyId) activeKeyId = rzpData.keyId;
       } catch (err: any) {
         console.warn('Razorpay backend create-order warning:', err);
@@ -864,7 +906,7 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({
         name: 'Feather Hut Fashion',
         description: `Order ${orderRef} • Authentic Indian Ethnic Wear`,
         image: (typeof window !== 'undefined' ? window.location.origin : '') + '/saree.jpeg',
-        order_id: activeRzpOrderId || undefined,
+        order_id: (isLiveOrder && activeRzpOrderId) ? activeRzpOrderId : undefined,
         callback_url: `${typeof window !== 'undefined' ? window.location.origin : ''}/api/razorpay/callback?orderId=${encodeURIComponent(orderRef)}`,
         redirect: false,
         handler: async function (response: any) {
@@ -916,7 +958,7 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({
         const elapsed = paymentSessionSeconds;
         setIsPaymentSessionActive(false);
         setIsRazorpayLoading(false);
-        console.error('Razorpay payment failed callback:', resp);
+        console.warn('Razorpay payment authorization failed callback notice:', resp?.error?.description || resp?.error?.message || 'Payment authorization declined');
 
         const errorObj = resp?.error || {};
         const parsed = {
@@ -951,7 +993,7 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({
       const elapsed = paymentSessionSeconds;
       setIsPaymentSessionActive(false);
       setIsRazorpayLoading(false);
-      console.error('Razorpay popup launch error:', err);
+      console.warn('Razorpay popup launch notice:', err?.message || err);
       const parsed = {
         title: 'Gateway Connection Failed',
         description: err?.message || 'Could not connect to Razorpay secure checkout servers.',
@@ -999,7 +1041,9 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({
         phonepeTransactionId: txnId,
         razorpayOrderId: rzpDetails?.razorpayOrderId,
         razorpayPaymentId: rzpDetails?.razorpayPaymentId,
-        razorpaySignature: rzpDetails?.razorpaySignature
+        razorpaySignature: rzpDetails?.razorpaySignature,
+        feathersUsed: useMagicFeathers ? feathersUsed : 0,
+        feathersDiscount: useMagicFeathers ? feathersDiscount : 0
       });
 
       const res: any = await orderPromise;
@@ -1018,7 +1062,7 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({
       setStep('success');
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err: any) {
-      console.error('Order processing error:', err);
+      console.warn('Order processing notice:', err?.message || err);
       setStep('checkout');
       showAlert(err.message || 'Could not place order due to an inventory verification error.', 'error', 'Order Verification Failed');
     }
@@ -1962,48 +2006,194 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({
               onApplyPromo={onApplyPromo}
               onRemovePromo={onRemovePromo}
               variant="checkout"
+              isFirstOrder={isFirstOrder}
             />
 
-            {/* Cross-Market Other Product Coupons Banner */}
-            <div className="p-3 bg-gradient-to-r from-amber-50 to-pink-50 border border-amber-200 rounded-2xl space-y-2 shadow-2xs">
-              <div className="flex items-center gap-1.5 text-xs font-black text-amber-950">
-                <BadgePercent className="w-3.5 h-3.5 text-pink-700" />
-                <Ticket className="w-3.5 h-3.5 text-pink-700" />
-                <span>Special Coupons on Other Collections:</span>
+            {/* Special Collection Coupons Banner */}
+            <div className="p-3.5 bg-gradient-to-r from-amber-50 via-pink-50 to-amber-50 border border-amber-200 rounded-2xl space-y-2.5 shadow-2xs">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className="flex items-center gap-1.5 text-xs font-black text-amber-950">
+                  <BadgePercent className="w-3.5 h-3.5 text-pink-700" />
+                  <Ticket className="w-3.5 h-3.5 text-pink-700" />
+                  <span>Special Collection Promo Codes</span>
+                </div>
+                <span className="text-[10px] font-bold text-emerald-800 bg-emerald-100/90 px-2 py-0.5 rounded-full border border-emerald-300">
+                  ⚡ Stacks with ₹55 Prepaid Offer
+                </span>
               </div>
-              <p className="text-[11px] text-amber-900">
-                Add matching items from these collections to unlock and stack additional discounts in this order:
+
+              <p className="text-[11px] text-amber-900 leading-tight">
+                Prepaid offer is an automatic payment discount and <strong>not considered a promo code</strong>. Promo codes such as <strong>GORBO</strong>, <strong>BHUSWARG</strong>, and <strong>BEAUTIFULYOU</strong> can be applied alongside your prepaid discount:
               </p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 pt-1">
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-0.5">
                 {[
-                  { code: 'GORBO', discount: '5% OFF', name: 'Sarees (excl. Firdausi)', cat: 'Sarees' },
-                  { code: 'INDIANA', discount: '2% OFF', name: 'Suit Sets', cat: 'Suit Sets' },
-                  { code: 'BEAUTIFULYOU', discount: '4% OFF', name: 'Dress Materials', cat: 'Dress Materials' },
-                  { code: 'BHUSWARG', discount: '6% OFF', name: 'Firdausi Collection', col: 'Firdausi' },
-                ].map((mc) => (
-                  <button
-                    key={mc.code}
-                    type="button"
-                    onClick={() => {
-                      if (mc.cat && onExploreCategory) onExploreCategory(mc.cat);
-                      else if (mc.col && onExploreCollection) onExploreCollection(mc.col);
-                      else onBackToHome();
-                    }}
-                    className="text-left bg-white/90 hover:bg-white p-2 rounded-lg border border-amber-200/80 text-xs transition-colors flex items-center justify-between gap-1 shadow-2xs cursor-pointer"
-                  >
-                    <div>
-                      <span className="font-mono font-bold text-pink-900 bg-pink-50 px-1 rounded text-[10px] mr-1">
-                        {mc.code}
-                      </span>
-                      <span className="font-semibold text-gray-800 text-[11px]">
-                        {mc.name} ({mc.discount})
-                      </span>
+                  { 
+                    code: 'GORBO', 
+                    discount: '5% OFF', 
+                    name: 'Sarees (excl. Firdausi)', 
+                    cat: 'Sarees',
+                    isEligible: cartItems.some(i => {
+                      const cat = (i.product?.category || '').toLowerCase();
+                      const col = (i.product?.collection || '').toLowerCase();
+                      const name = (i.product?.name || '').toLowerCase();
+                      return (cat.includes('saree') || cat.includes('sharee') || name.includes('saree') || name.includes('sharee')) &&
+                             !(col.includes('firdausi') || name.includes('firdausi'));
+                    })
+                  },
+                  { 
+                    code: 'INDIANA', 
+                    discount: '2% OFF', 
+                    name: 'Suit Sets', 
+                    cat: 'Suit Sets',
+                    isEligible: cartItems.some(i => {
+                      const cat = (i.product?.category || '').toLowerCase();
+                      const name = (i.product?.name || '').toLowerCase();
+                      return cat.includes('suit') || name.includes('suit') || name.includes('kurta');
+                    })
+                  },
+                  { 
+                    code: 'BEAUTIFULYOU', 
+                    discount: '4% OFF', 
+                    name: 'Dress Materials', 
+                    cat: 'Dress Materials',
+                    isEligible: cartItems.some(i => {
+                      const cat = (i.product?.category || '').toLowerCase();
+                      const name = (i.product?.name || '').toLowerCase();
+                      return cat.includes('dress material') || name.includes('dress material') || name.includes('unstitched');
+                    })
+                  },
+                  { 
+                    code: 'BHUSWARG', 
+                    discount: '6% OFF', 
+                    name: 'Firdausi Collection', 
+                    col: 'Firdausi',
+                    isEligible: cartItems.some(i => {
+                      const col = (i.product?.collection || '').toLowerCase();
+                      const name = (i.product?.name || '').toLowerCase();
+                      return col.includes('firdausi') || name.includes('firdausi');
+                    })
+                  },
+                ].map((mc) => {
+                  const isApplied = effectiveAppliedPromos.some(p => p.code.toUpperCase() === mc.code);
+                  return (
+                    <div
+                      key={mc.code}
+                      className={`p-2.5 rounded-xl border text-xs transition-all flex items-center justify-between gap-2 shadow-2xs ${
+                        isApplied 
+                          ? 'bg-emerald-50/90 border-emerald-300' 
+                          : 'bg-white/95 hover:bg-white border-amber-200/90'
+                      }`}
+                    >
+                      <div className="space-y-0.5">
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-mono font-black text-pink-900 bg-pink-100/90 px-1.5 py-0.5 rounded text-[11px] tracking-wider">
+                            {mc.code}
+                          </span>
+                          <span className="font-extrabold text-emerald-800 text-[10px] bg-emerald-50 px-1 rounded border border-emerald-200">
+                            {mc.discount}
+                          </span>
+                        </div>
+                        <p className="font-medium text-gray-700 text-[11px] leading-tight">
+                          {mc.name}
+                        </p>
+                      </div>
+
+                      <div className="shrink-0 flex items-center gap-1">
+                        {isApplied ? (
+                          <button
+                            type="button"
+                            onClick={() => onRemovePromo && onRemovePromo(mc.code)}
+                            className="bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] font-bold px-2 py-1 rounded-lg transition-colors flex items-center gap-0.5 cursor-pointer shadow-2xs"
+                          >
+                            <Check className="w-3 h-3" />
+                            <span>Applied</span>
+                          </button>
+                        ) : mc.isEligible ? (
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              if (onApplyPromo) {
+                                await onApplyPromo(mc.code);
+                              }
+                            }}
+                            className="bg-pink-700 hover:bg-pink-800 text-amber-200 text-[10px] font-bold px-2.5 py-1 rounded-lg transition-colors shadow-2xs cursor-pointer active:scale-95"
+                          >
+                            Apply
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (mc.cat && onExploreCategory) onExploreCategory(mc.cat);
+                              else if (mc.col && onExploreCollection) onExploreCollection(mc.col);
+                              else onBackToHome();
+                            }}
+                            className="text-[10px] font-semibold text-pink-900 bg-pink-50 hover:bg-pink-100 border border-pink-200 px-2 py-1 rounded-lg transition-colors flex items-center gap-0.5 cursor-pointer"
+                            title="Explore to add items"
+                          >
+                            <span>Shop</span>
+                            <ArrowRight className="w-2.5 h-2.5 text-pink-700" />
+                          </button>
+                        )}
+                      </div>
                     </div>
-                    <ArrowRight className="w-3 h-3 text-pink-700 shrink-0" />
-                  </button>
-                ))}
+                  );
+                })}
               </div>
             </div>
+          </div>
+
+          {/* Magic Feathers Loyalty & Referral Discount Card */}
+          <div className="bg-gradient-to-r from-amber-50/90 via-orange-50/70 to-amber-50/90 rounded-2xl border border-amber-300/80 p-3.5 space-y-2 shadow-xs">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-amber-500/20 text-amber-900 flex items-center justify-center shrink-0">
+                  <MagicFeatherSvg className="w-4 h-4 text-amber-700" />
+                </div>
+                <div>
+                  <h4 className="font-extrabold text-amber-950 text-xs flex items-center gap-1.5">
+                    <span>Magic Feathers</span>
+                    <span className="bg-amber-200/80 text-amber-900 text-[10px] font-black px-2 py-0.5 rounded-full">
+                      {availableFeathers} Feathers
+                    </span>
+                  </h4>
+                  <p className="text-[11px] text-amber-800">
+                    Balance: <strong>₹{(availableFeathers * FEATHER_RUPEE_VALUE).toFixed(2)}</strong> (1 Feather = ₹0.50)
+                  </p>
+                </div>
+              </div>
+
+              {availableFeathers > 0 ? (
+                <label className="flex items-center gap-2 cursor-pointer bg-white/90 border border-amber-300 px-3 py-1.5 rounded-xl shadow-xs hover:bg-amber-100/50 transition-all select-none">
+                  <input
+                    type="checkbox"
+                    checked={useMagicFeathers}
+                    onChange={(e) => setUseMagicFeathers(e.target.checked)}
+                    className="w-4 h-4 text-amber-700 accent-amber-700 rounded cursor-pointer"
+                  />
+                  <span className="text-xs font-black text-amber-950">
+                    {useMagicFeathers ? 'Applied' : 'Apply'}
+                  </span>
+                </label>
+              ) : (
+                <span className="text-[10px] font-bold text-amber-700 bg-amber-100/80 px-2 py-1 rounded-lg border border-amber-200">
+                  Join via referral for ₹20
+                </span>
+              )}
+            </div>
+
+            {availableFeathers > 0 ? (
+              <p className="text-[10px] text-amber-800 leading-tight">
+                {useMagicFeathers
+                  ? `✓ Applying ${feathersUsed} feathers to save ₹${feathersDiscount.toFixed(2)} on this order!`
+                  : `Check "Apply" to instantly deduct up to ₹${maxPossibleFeatherDiscount.toFixed(2)} from your order total.`}
+              </p>
+            ) : (
+              <p className="text-[10px] text-amber-800 leading-tight">
+                🎁 Tip: When you create an account using anyone's referral code, you get <strong>₹20 worth of Magic Feathers (40 feathers)</strong> to use for discounts!
+              </p>
+            )}
           </div>
 
           {/* Prepaid Discount Banner */}
@@ -2012,11 +2202,16 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({
               <Zap className="w-4 h-4 text-amber-700" />
             </div>
             <div className="space-y-0.5 text-xs">
-              <p className="font-extrabold text-amber-950">
-                Prepaid Discount: Flat ₹55 OFF
-              </p>
+              <div className="flex items-center gap-2 flex-wrap">
+                <p className="font-extrabold text-amber-950">
+                  Prepaid Discount: Flat ₹55 OFF
+                </p>
+                <span className="text-[10px] font-bold text-amber-900 bg-amber-200/80 px-2 py-0.5 rounded-full border border-amber-300">
+                  Automatic Payment Offer
+                </span>
+              </div>
               <p className="text-amber-800 leading-tight text-[11px]">
-                Pay online using UPI, Cards or NetBanking to automatically get Flat ₹55 off. No promo code needed.
+                Pay online using UPI, Cards or NetBanking to automatically get Flat ₹55 off. <strong>This is NOT a promo code</strong>—you can freely apply promo codes like GORBO, BHUSWARG, or BEAUTIFULYOU on top of this!
               </p>
             </div>
           </div>
@@ -2038,9 +2233,9 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({
                 <span className="font-mono font-bold">-₹{totalDiscount.toLocaleString('en-IN')}</span>
               </div>
 
-              {appliedPromo && (
+              {effectiveAppliedPromos.length > 0 && (
                 <div className="flex justify-between text-emerald-700">
-                  <span>Coupon Savings ({appliedPromo.code})</span>
+                  <span>Coupon Savings ({effectiveAppliedPromos.map(p => p.code).join(' + ')})</span>
                   <span className="font-mono font-bold">-₹{couponDiscount.toLocaleString('en-IN')}</span>
                 </div>
               )}
@@ -2052,6 +2247,16 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({
                     <span>Prepaid Order Discount</span>
                   </span>
                   <span className="font-mono font-bold text-emerald-800">-₹{prepaidDiscount.toLocaleString('en-IN')}</span>
+                </div>
+              )}
+
+              {useMagicFeathers && feathersDiscount > 0 && (
+                <div className="flex justify-between items-center text-amber-900 bg-amber-50/90 px-2.5 py-1.5 rounded-xl border border-amber-300">
+                  <span className="font-semibold flex items-center gap-1.5">
+                    <MagicFeatherSvg className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+                    <span>Magic Feathers Discount ({feathersUsed} Feathers)</span>
+                  </span>
+                  <span className="font-mono font-black text-amber-900">-₹{feathersDiscount.toLocaleString('en-IN')}</span>
                 </div>
               )}
 

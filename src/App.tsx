@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { Navbar } from './components/Navbar';
 import { TopCategoryStories } from './components/TopCategoryStories';
 import { TopCollectionStories } from './components/TopCollectionStories';
@@ -28,8 +28,12 @@ import { AuthModal } from './components/AuthModal';
 import { CustomAlertModal, AlertModalState } from './components/CustomAlertModal';
 import { AccountAuthBarrier } from './components/AccountAuthBarrier';
 import { getStoredCustomerSession, subscribeToCustomerAuth, signOutCustomer, CustomerSession } from './services/authService';
-import { savePendingReferralCode, getPendingReferralCode } from './services/referralService';
+import { savePendingReferralCode, getPendingReferralCode, redeemFeathers } from './services/referralService';
 import { FloatingFeatherAnimation, triggerFeatherAnimation, triggerFeatherDropAnimation, FeatherParticle } from './components/FloatingFeatherAnimation';
+import { LoadingScreen } from './components/LoadingScreen';
+import { ProductGridSkeleton, FeaturedCollectionSkeleton } from './components/ProductCardSkeleton';
+import { ProductPageSkeleton } from './components/ProductPageSkeleton';
+import { LoadMoreSkeletonCard } from './components/LoadMoreSkeletonCard';
 import { 
   auth, 
   onAuthStateChanged, 
@@ -64,12 +68,21 @@ import {
 } from './data/initialData';
 import { getCategoryFallbackImage } from './utils/productImage';
 import { deduplicateProducts } from './utils/productUtils';
-import { SlidersHorizontal, ArrowUpDown, Shield, ShieldCheck, Heart, Truck, RefreshCw, Phone, Check, Grid, Shirt, Layers, Flame, Crown, Briefcase, Gift, Tag, PartyPopper, Scissors, Gem, Youtube, Facebook, Instagram } from 'lucide-react';
+import { 
+  isFirdausiProduct, 
+  isSareeProduct, 
+  isDressMaterialProduct, 
+  isSuitProduct, 
+  getCouponType, 
+  isCouponEligibleForProducts, 
+  pruneIneligibleCoupons 
+} from './utils/couponEligibility';
+import { getAdminToken } from './utils/adminAuth';
+import { SlidersHorizontal, ArrowUpDown, Shield, ShieldCheck, Heart, Truck, RefreshCw, Phone, Check, Grid, Shirt, Layers, Flame, Crown, Briefcase, Gift, Tag, PartyPopper, Scissors, Gem, Youtube, Facebook, Instagram, Sparkles, ChevronDown, ChevronUp, ArrowRight, Feather } from 'lucide-react';
 
 // Clean up any deprecated legacy cache to ensure clean storage quotas
 try {
   localStorage.removeItem('feat_orders');
-  localStorage.removeItem('feat_products');
   localStorage.removeItem('feat_banners');
   localStorage.removeItem('feat_promos');
   localStorage.removeItem('feat_live_sale');
@@ -124,9 +137,105 @@ export const isRealProduct = (p: { id?: string; sku?: string } | null | undefine
   return true;
 };
 
+// Fast local catalog hydration to prevent cold start flicker on page load / refresh
+export const getInitialCachedProducts = (): Product[] => {
+  try {
+    const cached = sessionStorage.getItem('feat_catalog_cache_v3') || localStorage.getItem('feat_catalog_cache_v3') || localStorage.getItem('feat_products');
+    if (cached) {
+      const parsed = JSON.parse(cached);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return deduplicateProducts(parsed.filter(isRealProduct).map(normalizeProductRatings));
+      }
+    }
+  } catch (e) {}
+  return [];
+};
+
 export default function App() {
-  // App Core State (Loaded directly from Firestore database & backend API)
-  const [products, setProducts] = useState<Product[]>([]);
+  // Helper to extract initial ?product= query parameter from URL
+  const getInitialUrlProductId = () => {
+    try {
+      if (typeof window === 'undefined') return null;
+      return new URLSearchParams(window.location.search).get('product');
+    } catch {
+      return null;
+    }
+  };
+
+  const initialUrlProdId = getInitialUrlProductId();
+
+  // App Initial Loading Screen with Brand, Animated Feathers & Highlighted Tagline
+  // When loading directly to a product page (?product=), bypass the generic home loading screen
+  // so the dedicated ProductPageSkeleton is shown immediately
+  const [isLoadingScreenActive, setIsLoadingScreenActive] = useState(() => !Boolean(initialUrlProdId));
+
+  // Active product query parameter tracking
+  const [activeUrlProductId, setActiveUrlProductId] = useState<string | null>(initialUrlProdId);
+
+  // App Core State (Loaded directly from Firestore database & backend API with fast local cache)
+  const [products, setProducts] = useState<Product[]>(getInitialCachedProducts);
+  const [isLoadingProducts, setIsLoadingProducts] = useState<boolean>(() => products.length === 0);
+
+  // Track explicitly deleted product IDs/SKUs to prevent them from being restored by sync
+  const deletedProductIdsRef = useRef<Set<string>>(new Set());
+  // Track recently added or modified products to protect them from transient/stale snapshots
+  const recentLocalProductsRef = useRef<Map<string, { product: Product; timestamp: number }>>(new Map());
+
+  // Synchronized products updater with instant session/local storage cache
+  const handleSetProducts = useCallback((cleanList: Product[]) => {
+    setProducts(prev => {
+      // 1. Map of incoming cleanList products (ignoring deleted items)
+      const map = new Map<string, Product>();
+      for (const p of cleanList) {
+        if (!p || !p.id) continue;
+        if (deletedProductIdsRef.current.has(p.id) || (p.sku && deletedProductIdsRef.current.has(p.sku))) {
+          continue;
+        }
+        map.set(p.id, p);
+      }
+
+      // 2. Preserve any products currently in `prev` that are not deleted
+      // This protects newly created or updated products from disappearing when Firestore snapshot fires!
+      for (const p of prev) {
+        if (!p || !p.id) continue;
+        if (deletedProductIdsRef.current.has(p.id) || (p.sku && deletedProductIdsRef.current.has(p.sku))) {
+          continue;
+        }
+        if (!map.has(p.id)) {
+          const hasSkuMatch = p.sku && Array.from(map.values()).some(item => item.sku === p.sku);
+          if (!hasSkuMatch) {
+            map.set(p.id, p);
+          }
+        }
+      }
+
+      // 3. Guarantee all recent local additions/updates (within last 30 minutes) remain present
+      const now = Date.now();
+      for (const [key, entry] of recentLocalProductsRef.current.entries()) {
+        if (now - entry.timestamp < 30 * 60 * 1000) {
+          const prod = entry.product;
+          if (!deletedProductIdsRef.current.has(prod.id) && (!prod.sku || !deletedProductIdsRef.current.has(prod.sku))) {
+            const hasId = map.has(prod.id);
+            const hasSku = prod.sku && Array.from(map.values()).some(item => item.sku === prod.sku);
+            if (!hasId && !hasSku) {
+              map.set(prod.id, prod);
+            }
+          }
+        } else {
+          recentLocalProductsRef.current.delete(key);
+        }
+      }
+
+      const mergedList = deduplicateProducts(Array.from(map.values()));
+      try {
+        sessionStorage.setItem('feat_catalog_cache_v3', JSON.stringify(mergedList));
+        localStorage.setItem('feat_catalog_cache_v3', JSON.stringify(mergedList));
+      } catch (e) {}
+      return mergedList;
+    });
+    setIsLoadingProducts(false);
+  }, []);
+
   const [orders, setOrders] = useState<Order[]>([]);
   const [notifications, setNotifications] = useState<PushNotification[]>(INITIAL_NOTIFICATIONS);
   const [promos, setPromos] = useState<PromoCode[]>(INITIAL_PROMOS);
@@ -167,7 +276,9 @@ export default function App() {
       const saved = localStorage.getItem('feat_applied_promos_v2');
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) return parsed;
+        if (Array.isArray(parsed)) {
+          return parsed.filter(p => p && p.code && !p.code.toUpperCase().startsWith('PREPAID') && p.code.toUpperCase() !== 'FEAT200' && p.code.toUpperCase() !== 'FLAT200');
+        }
       }
     } catch (e) {}
     return [];
@@ -289,7 +400,12 @@ export default function App() {
 
   // Modals Visibility State
   const [isOfferModalOpen, setIsOfferModalOpen] = useState(false);
-  const [selectedProductDetails, setSelectedProductDetails] = useState<Product | null>(null);
+  const [selectedProductDetails, setSelectedProductDetails] = useState<Product | null>(() => {
+    if (initialUrlProdId && products.length > 0) {
+      return products.find(p => p.id === initialUrlProdId || p.sku === initialUrlProdId) || null;
+    }
+    return null;
+  });
   const [selectedOrderForDetails, setSelectedOrderForDetails] = useState<Order | null>(null);
   const [isCartOpen, setIsCartOpen] = useState(false);
   const [isWishlistOpen, setIsWishlistOpen] = useState(false);
@@ -365,10 +481,12 @@ export default function App() {
   const handleSelectProduct = (product: Product | null) => {
     setSelectedProductDetails(product);
     if (product) {
+      setActiveUrlProductId(product.id);
       const currentUrl = new URL(window.location.href);
       currentUrl.searchParams.set('product', product.id);
       window.history.pushState({ productId: product.id }, '', currentUrl.pathname + currentUrl.search);
     } else {
+      setActiveUrlProductId(null);
       const currentUrl = new URL(window.location.href);
       currentUrl.searchParams.delete('product');
       window.history.pushState({}, '', currentUrl.pathname + (currentUrl.search ? currentUrl.search : ''));
@@ -385,14 +503,16 @@ export default function App() {
     try {
       const url = new URL(path, window.location.origin);
       const prodId = url.searchParams.get('product');
+      setActiveUrlProductId(prodId);
       if (prodId && products.length > 0) {
-        const found = products.find(p => p.id === prodId);
+        const found = products.find(p => p.id === prodId || p.sku === prodId);
         setSelectedProductDetails(found || null);
       } else {
         setSelectedProductDetails(null);
       }
     } catch {
       setSelectedProductDetails(null);
+      setActiveUrlProductId(null);
     }
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -405,8 +525,9 @@ export default function App() {
 
       const params = new URLSearchParams(window.location.search);
       const urlProductId = params.get('product');
+      setActiveUrlProductId(urlProductId);
       if (urlProductId && products.length > 0) {
-        const found = products.find(p => p.id === urlProductId);
+        const found = products.find(p => p.id === urlProductId || p.sku === urlProductId);
         if (found) {
           setSelectedProductDetails(found);
           return;
@@ -501,14 +622,27 @@ export default function App() {
     };
   }, [products, currentPath]);
 
+  // Synchronize product detail when products catalog finishes loading or updating
+  useEffect(() => {
+    if (activeUrlProductId && products.length > 0) {
+      const found = products.find(p => p.id === activeUrlProductId || p.sku === activeUrlProductId);
+      if (found) {
+        setSelectedProductDetails(found);
+      }
+    }
+  }, [activeUrlProductId, products]);
+
   // Update document title and SEO meta descriptions dynamically based on route and product selection
   useEffect(() => {
     let title = 'Feat: Feather Hut Fashion | Authentic Indian Ethnic Sarees, Kurtis & Salwar Suits';
     let desc = 'Shop authentic Indian ethnic wear at Feat: Feather Hut Fashion. Handloom Chanderi silk sarees, designer kurtis, Banarasi ensembles, salwar suits, and dress materials.';
 
     if (selectedProductDetails) {
-      title = `${selectedProductDetails.name} - ₹${selectedProductDetails.price.toLocaleString('en-IN')} | Feat: Feather Hut Fashion`;
+      title = `${selectedProductDetails.name} - ₹${(selectedProductDetails.price ?? 0).toLocaleString('en-IN')} | Feat: Feather Hut Fashion`;
       desc = `Buy ${selectedProductDetails.name} in ${selectedProductDetails.fabric || 'authentic silk'} online at Feat: Feather Hut Fashion. 100% Handcrafted ethnic wear with express shipping across India.`;
+    } else if (activeUrlProductId) {
+      title = `Loading Royal Ethnic Wear #${activeUrlProductId} | Feat: Feather Hut Fashion`;
+      desc = 'Handcrafted luxury Indian ethnic wear at Feat: Feather Hut Fashion. Handloom silk sarees, designer kurtis, and royal ensembles.';
     } else if (currentPath.includes('admin')) {
       title = 'Merchant Admin Dashboard | Feat: Feather Hut Fashion';
       desc = 'Administrative management portal for products, inventory, orders, and promotional coupons.';
@@ -567,7 +701,7 @@ export default function App() {
             .map(normalizeProductRatings)
         );
         if (cleanList.length > 0) {
-          setProducts(cleanList);
+          handleSetProducts(cleanList);
         }
       }
     });
@@ -703,7 +837,7 @@ export default function App() {
       if (firestoreItems && firestoreItems.length > 0) {
         const cleanList = deduplicateProducts(firestoreItems.filter(isRealProduct).map(normalizeProductRatings));
         if (cleanList.length > 0) {
-          setProducts(cleanList);
+          handleSetProducts(cleanList);
           return;
         }
       }
@@ -716,7 +850,7 @@ export default function App() {
           if (data && Array.isArray(data.products) && data.products.length > 0) {
             const cleanList = deduplicateProducts(data.products.filter(isRealProduct).map(normalizeProductRatings));
             if (cleanList.length > 0) {
-              setProducts(cleanList);
+              handleSetProducts(cleanList);
             }
           }
         }
@@ -725,12 +859,14 @@ export default function App() {
       }
     } catch (err) {
       console.warn('Catalog fetch notice:', err);
+    } finally {
+      setIsLoadingProducts(false);
     }
   };
 
   const fetchOrders = async () => {
     const customer = getStoredCustomerSession();
-    const adminToken = localStorage.getItem('feat_admin_token') || sessionStorage.getItem('feat_admin_token');
+    const adminToken = getAdminToken();
 
     try {
       // 1. Fetch real orders directly from Firestore first
@@ -747,6 +883,7 @@ export default function App() {
       const headers: Record<string, string> = {};
       if (adminToken) {
         headers['x-admin-token'] = adminToken;
+        headers['Authorization'] = `Bearer ${adminToken}`;
       } else if (customer?.token) {
         headers['x-auth-token'] = customer.token;
       }
@@ -769,8 +906,9 @@ export default function App() {
   };
 
   useEffect(() => {
-    const adminToken = localStorage.getItem('feat_admin_token') || sessionStorage.getItem('feat_admin_token');
-    if (currentUser || currentPath.includes('admin') || adminToken) {
+    const adminToken = getAdminToken();
+    const customer = getStoredCustomerSession();
+    if (currentUser || adminToken || customer?.token) {
       fetchOrders();
     } else {
       setOrders([]);
@@ -782,7 +920,7 @@ export default function App() {
     try {
       const email = (currentUser?.email || '').toLowerCase().trim();
       const userId = (currentUser?.uid || '').trim();
-      const adminToken = localStorage.getItem('feat_admin_token') || sessionStorage.getItem('feat_admin_token') || '';
+      const adminToken = getAdminToken();
       const params = new URLSearchParams();
       if (email) params.set('email', email);
       if (userId) params.set('userId', userId);
@@ -793,7 +931,10 @@ export default function App() {
         headers: {
           ...(email ? { 'x-user-email': email } : {}),
           ...(userId ? { 'x-user-id': userId } : {}),
-          ...(adminToken ? { 'x-admin-token': adminToken } : {})
+          ...(adminToken ? { 
+            'x-admin-token': adminToken,
+            'Authorization': `Bearer ${adminToken}`
+          } : {})
         }
       });
       if (!res.ok) return;
@@ -939,8 +1080,58 @@ export default function App() {
     }
   };
 
+  // Check if current customer is placing their very first order
+  const isFirstOrder = useMemo(() => {
+    try {
+      if (typeof window !== 'undefined' && localStorage.getItem('feat_has_placed_order') === 'true') {
+        return false;
+      }
+    } catch (e) {}
+
+    let storedEmail = '';
+    let storedPhone = '';
+    try {
+      storedEmail = (localStorage.getItem('feat_saved_customer_email') || '').trim().toLowerCase();
+      const storedAddr = localStorage.getItem('feat_saved_delivery_address');
+      if (storedAddr) {
+        const parsed = JSON.parse(storedAddr);
+        storedPhone = (parsed?.phone || '').replace(/\D/g, '');
+      }
+    } catch (e) {}
+
+    const userEmail = (currentUser?.email || storedEmail || '').trim().toLowerCase();
+    const userPhone = (currentUser?.phone || storedPhone || '').replace(/\D/g, '');
+    const userUid = currentUser?.uid || '';
+
+    const hasPrior = orders.some(o => {
+      if (o.orderStatus === 'Cancelled' || (o.orderStatus as string) === 'Returned') return false;
+      if (o.paymentStatus === 'Void' || o.paymentStatus === 'Failed') return false;
+      const oid = (o.id || '').toUpperCase();
+      if (oid.startsWith('TEST') || oid.startsWith('DEMO') || oid.includes('MOCK') || oid.includes('DUMMY')) return false;
+      if ((o.finalAmount || 0) <= 10) return false;
+
+      const orderEmail = (o.customerEmail || '').trim().toLowerCase();
+      if (orderEmail.endsWith('@example.com') || orderEmail.includes('mock') || orderEmail.includes('dummy')) return false;
+
+      const orderPhone = (o.deliveryAddress?.phone || '').replace(/\D/g, '');
+      const normOrderPhone = orderPhone.slice(-10);
+      const normUserPhone = userPhone.slice(-10);
+      const phoneMatches = Boolean(
+        normUserPhone.length >= 10 &&
+        normOrderPhone.length >= 10 &&
+        normOrderPhone === normUserPhone
+      );
+
+      return (userEmail && orderEmail && userEmail === orderEmail) ||
+             phoneMatches ||
+             (userUid && o.userId && userUid === o.userId);
+    });
+
+    return !hasPrior;
+  }, [orders, currentUser]);
+
   // Multi-Coupon Promo Handler with stacking & security loop-hole prevention
-  const handleApplyPromo = async (code: string, contextPrice?: number): Promise<{ valid: boolean; message?: string }> => {
+  const handleApplyPromo = async (code: string, contextPrice?: number, targetProduct?: Product): Promise<{ valid: boolean; message?: string }> => {
     if (!code || !code.trim()) {
       return { valid: false, message: 'Please select a coupon code' };
     }
@@ -952,6 +1143,14 @@ export default function App() {
       return { valid: false, message: 'The coupon code FEAT200 has been discontinued.' };
     }
 
+    // Prepaid offer is an automatic payment discount (₹55 OFF), NOT a promo code.
+    if (cleanCode.startsWith('PREPAID')) {
+      return { 
+        valid: false, 
+        message: 'Prepaid offer (Flat ₹55 OFF) is an automatic payment discount on UPI & Cards—it is NOT a promo code! You can apply promo codes like GORBO, BHUSWARG, or BEAUTIFULYOU on top of your prepaid discount.' 
+      };
+    }
+
     // Toggle off / remove if already applied
     const isAlreadyApplied = appliedPromos.some(p => p.code.toUpperCase() === cleanCode);
     if (isAlreadyApplied) {
@@ -959,15 +1158,85 @@ export default function App() {
       return { valid: true, message: `Coupon ${cleanCode} removed` };
     }
 
+    // Mutual exclusivity and first order restriction
+    if ((cleanCode === 'FEAT6' || cleanCode === 'FEAT2.0') && (isFirstOrder || appliedPromos.some(p => p.code.toUpperCase() === 'WELCOME76'))) {
+      return { 
+        valid: false, 
+        message: 'FEAT6 and FEAT2.0 are tier rewards for your 2nd order onwards. On your first order, please enjoy Welcome76 (₹76 OFF)!' 
+      };
+    }
+    if (cleanCode === 'WELCOME76' && !isFirstOrder) {
+      return { 
+        valid: false, 
+        message: 'Promo code Welcome76 is valid only on your first order. On your next order, only FEAT6 (₹1,300 to ₹1,999) or FEAT2.0 (₹2,000 or over) can be applied.' 
+      };
+    }
+    if (cleanCode === 'FEAT6' && appliedPromos.some(p => p.code.toUpperCase() === 'WELCOME76')) {
+      return { valid: false, message: 'FEAT6 cannot be combined with WELCOME76.' };
+    }
+    if (cleanCode === 'WELCOME76' && appliedPromos.some(p => p.code.toUpperCase() === 'FEAT6')) {
+      return { valid: false, message: 'WELCOME76 cannot be combined with FEAT6.' };
+    }
+
     const totalMrp = cart.reduce((acc, item) => acc + item.product.originalPrice * item.quantity, 0);
     const totalDiscount = cart.reduce((acc, item) => acc + (item.product.originalPrice - item.product.price) * item.quantity, 0);
     const cartTotal = totalMrp - totalDiscount;
-    const effectiveTotal = cartTotal > 0 ? cartTotal : (contextPrice || (selectedProductDetails ? selectedProductDetails.price : 0));
-    const activeItems = cart.length > 0 
-      ? cart.map(i => ({ product: i.product, quantity: i.quantity }))
-      : (selectedProductDetails ? [{ product: selectedProductDetails, quantity: 1 }] : []);
+    const currentContextProduct = targetProduct || selectedProductDetails;
+    const currentProdPrice = currentContextProduct ? currentContextProduct.price : 0;
+    const effectiveTotal = contextPrice || (cartTotal > 0 ? cartTotal : currentProdPrice);
 
-    const targetCodes = Array.from(new Set([...appliedPromos.map(p => p.code), cleanCode]));
+    const cartItemsMap = cart.map(i => ({ product: i.product, quantity: i.quantity }));
+    let activeItems: { product: Product; quantity: number }[] = [];
+
+    if (currentContextProduct) {
+      const currentQty = (contextPrice && currentContextProduct.price > 0)
+        ? Math.max(1, Math.round(contextPrice / currentContextProduct.price))
+        : 1;
+      activeItems = [{ product: currentContextProduct, quantity: currentQty }];
+      for (const ci of cartItemsMap) {
+        if (ci.product.id !== currentContextProduct.id && (!currentContextProduct.sku || ci.product.sku !== currentContextProduct.sku)) {
+          activeItems.push(ci);
+        }
+      }
+    } else {
+      activeItems = cartItemsMap;
+    }
+    const activeProducts = activeItems.map(i => i.product || i);
+
+    // Validate category eligibility of the incoming code against active products
+    if (activeProducts.length > 0 && !isCouponEligibleForProducts(cleanCode, activeProducts)) {
+      const type = getCouponType(cleanCode);
+      if (type === 'category_saree') {
+        return { valid: false, message: 'Promo code GORBO is valid only on Sarees (excluding Firdausi).' };
+      }
+      if (type === 'category_firdausi') {
+        return { valid: false, message: 'Promo code BHUSWARG is valid only on the Firdausi collection.' };
+      }
+      if (type === 'category_dress') {
+        return { valid: false, message: 'Promo code BEAUTIFULYOU is valid only on Dress Materials.' };
+      }
+      if (type === 'category_suit') {
+        return { valid: false, message: 'Promo code INDIANA is valid only on Suit Sets.' };
+      }
+    }
+
+    // Prune any applied coupons that are ineligible for the active products (e.g. BEAUTIFULYOU when looking at Sarees)
+    const eligibleCurrentPromos = pruneIneligibleCoupons(appliedPromos, activeProducts, isFirstOrder, effectiveTotal);
+
+    // Intelligent coupon slot management:
+    // - Milestone coupons (WELCOME76, FEAT6, FEAT2.0): max 1. New milestone replaces existing milestone.
+    // - Category coupons (GORBO, BHUSWARG, BEAUTIFULYOU, INDIANA): max 1 per category.
+    // - Multiple distinct collection coupons CAN be stacked if the user has items from multiple categories in their order!
+    const newCouponType = getCouponType(cleanCode);
+    let basePromos = [...eligibleCurrentPromos];
+
+    if (newCouponType === 'milestone') {
+      basePromos = basePromos.filter(p => getCouponType(p.code) !== 'milestone');
+    } else if (newCouponType.startsWith('category_')) {
+      basePromos = basePromos.filter(p => getCouponType(p.code) !== newCouponType);
+    }
+
+    const targetCodes = Array.from(new Set([...basePromos.map(p => p.code), cleanCode]));
 
     try {
       const res = await fetch('/api/promos/verify', {
@@ -1043,71 +1312,49 @@ export default function App() {
                (userUid && orderUid && userUid === orderUid);
       });
       if (hasPriorOrder) {
-        return { valid: false, message: 'Promo code Welcome76 is valid only on your first order.' };
+        return { valid: false, message: 'Promo code Welcome76 is valid only on your first order. On your second order, please use flat offers like FEAT6 (over ₹1,300) or FEAT2.0 (over ₹2,000).' };
       }
     }
-
-    const isFirdausi = (prod: any) => {
-      const col = (prod?.collection || '').toLowerCase();
-      const name = (prod?.name || '').toLowerCase();
-      const tags = Array.isArray(prod?.tags) ? prod.tags.map((t: any) => String(t).toLowerCase()) : [];
-      return col.includes('firdausi') || name.includes('firdausi') || tags.some((t: string) => t.includes('firdausi'));
-    };
-
-    const isSaree = (prod: any) => {
-      const cat = (prod?.category || '').toLowerCase();
-      const name = (prod?.name || '').toLowerCase();
-      const tags = Array.isArray(prod?.tags) ? prod.tags.map((t: any) => String(t).toLowerCase()) : [];
-      return cat.includes('sharee') || cat.includes('saree') || name.includes('saree') || name.includes('sharee') || tags.some((t: string) => t.includes('saree') || t.includes('sharee'));
-    };
 
     if (cleanCode === 'FEAT6') {
-      if (effectiveTotal <= 1300) {
-        return { valid: false, message: 'FEAT6 promo code is applicable when billing value is more than 1300 rupees.' };
+      if (effectiveTotal < 1300) {
+        return { valid: false, message: 'FEAT6 promo code is applicable when billing value is between ₹1,300 and ₹1,999.' };
       }
-      if (effectiveTotal > 2000) {
-        return { valid: false, message: 'FEAT6 is valid for purchases up to ₹2,000. For orders over ₹2,000, you get FEAT2.0 (₹200 OFF).' };
+      if (effectiveTotal > 1999) {
+        return { valid: false, message: 'FEAT6 is valid for purchases from ₹1,300 to ₹1,999. For orders of ₹2,000 or over, please use FEAT2.0 (₹200 OFF).' };
       }
       if (appliedPromos.some(p => p.code.toUpperCase() === 'FEAT2.0')) {
-        return { valid: false, message: 'FEAT6 cannot be combined with FEAT2.0. Over ₹2,000, you only get FEAT2.0.' };
+        return { valid: false, message: 'FEAT6 cannot be combined with FEAT2.0. Over ₹2,000, only FEAT2.0 applies.' };
       }
     }
 
-    if (cleanCode === 'FEAT2.0' && effectiveTotal <= 2000) {
-      return { valid: false, message: 'Promo code FEAT2.0 is valid only on product value exceeding ₹2,000.' };
+    if (cleanCode === 'FEAT2.0' && effectiveTotal < 2000) {
+      return { valid: false, message: 'Promo code FEAT2.0 is valid only on purchases of ₹2,000 or over.' };
     }
 
     if (cleanCode === 'INDIANA') {
-      const matchingItems = activeItems.filter(i => {
-        const cat = (i.product.category || '').toLowerCase();
-        const name = (i.product.name || '').toLowerCase();
-        return cat.includes('suit') || cat.includes('indo') || name.includes('suit') || name.includes('indo');
-      });
+      const matchingItems = activeItems.filter(i => isSuitProduct(i.product));
       if (activeItems.length > 0 && matchingItems.length === 0) {
         return { valid: false, message: 'Promo code INDIANA is valid only for Suit Sets and Indo-Western sets.' };
       }
     }
 
     if (cleanCode === 'GORBO') {
-      const matchingItems = activeItems.filter(i => isSaree(i.product) && !isFirdausi(i.product));
+      const matchingItems = activeItems.filter(i => isSareeProduct(i.product));
       if (activeItems.length > 0 && matchingItems.length === 0) {
         return { valid: false, message: 'Promo code GORBO is valid only for Sarees (excluding Firdausi collection).' };
       }
     }
 
     if (cleanCode === 'BEAUTIFULYOU') {
-      const matchingItems = activeItems.filter(i => {
-        const cat = (i.product.category || '').toLowerCase();
-        const name = (i.product.name || '').toLowerCase();
-        return cat.includes('dress material') || name.includes('dress material') || name.includes('unstitched');
-      });
+      const matchingItems = activeItems.filter(i => isDressMaterialProduct(i.product));
       if (activeItems.length > 0 && matchingItems.length === 0) {
         return { valid: false, message: 'Promo code BEAUTIFULYOU is valid only for Dress Materials.' };
       }
     }
 
     if (cleanCode === 'BHUSWARG') {
-      const matchingItems = activeItems.filter(i => isFirdausi(i.product));
+      const matchingItems = activeItems.filter(i => isFirdausiProduct(i.product));
       if (activeItems.length > 0 && matchingItems.length === 0) {
         return { valid: false, message: 'Promo code BHUSWARG is valid only for the Firdausi collection.' };
       }
@@ -1122,33 +1369,25 @@ export default function App() {
     if (cleanCode === 'FEAT2.0') {
       calcDiscount = 200;
     } else if (cleanCode === 'FEAT6') {
-      calcDiscount = 60;
+      calcDiscount = 24;
     } else if (cleanCode === 'INDIANA') {
-      const matchingItems = activeItems.filter(i => {
-        const cat = (i.product.category || '').toLowerCase();
-        const name = (i.product.name || '').toLowerCase();
-        return cat.includes('suit') || cat.includes('indo') || name.includes('suit') || name.includes('indo');
-      });
+      const matchingItems = activeItems.filter(i => isSuitProduct(i.product));
       const eligibleTotal = matchingItems.length > 0 ? matchingItems.reduce((sum, i) => sum + (i.product.price * i.quantity), 0) : effectiveTotal;
-      calcDiscount = Math.round((eligibleTotal * 2) / 100);
+      calcDiscount = Number(((eligibleTotal * 2) / 100).toFixed(2));
     } else if (cleanCode === 'GORBO') {
-      const matchingItems = activeItems.filter(i => isSaree(i.product) && !isFirdausi(i.product));
+      const matchingItems = activeItems.filter(i => isSareeProduct(i.product));
       const eligibleTotal = matchingItems.length > 0 ? matchingItems.reduce((sum, i) => sum + (i.product.price * i.quantity), 0) : effectiveTotal;
-      calcDiscount = Math.round((eligibleTotal * 5) / 100);
+      calcDiscount = Number(((eligibleTotal * 5) / 100).toFixed(2));
     } else if (cleanCode === 'BEAUTIFULYOU') {
-      const matchingItems = activeItems.filter(i => {
-        const cat = (i.product.category || '').toLowerCase();
-        const name = (i.product.name || '').toLowerCase();
-        return cat.includes('dress material') || name.includes('dress material') || name.includes('unstitched');
-      });
+      const matchingItems = activeItems.filter(i => isDressMaterialProduct(i.product));
       const eligibleTotal = matchingItems.length > 0 ? matchingItems.reduce((sum, i) => sum + (i.product.price * i.quantity), 0) : effectiveTotal;
-      calcDiscount = Math.round((eligibleTotal * 4) / 100);
+      calcDiscount = Number(((eligibleTotal * 4) / 100).toFixed(2));
     } else if (cleanCode === 'BHUSWARG') {
-      const matchingItems = activeItems.filter(i => isFirdausi(i.product));
+      const matchingItems = activeItems.filter(i => isFirdausiProduct(i.product));
       const eligibleTotal = matchingItems.length > 0 ? matchingItems.reduce((sum, i) => sum + (i.product.price * i.quantity), 0) : effectiveTotal;
-      calcDiscount = Math.round((eligibleTotal * 6) / 100);
+      calcDiscount = Number(((eligibleTotal * 6) / 100).toFixed(2));
     } else if (found.discountType === 'percent') {
-      calcDiscount = Math.round((effectiveTotal * found.discountValue) / 100);
+      calcDiscount = Number(((effectiveTotal * found.discountValue) / 100).toFixed(2));
     } else {
       calcDiscount = Math.min(effectiveTotal > 0 ? effectiveTotal : found.discountValue, found.discountValue);
     }
@@ -1157,7 +1396,7 @@ export default function App() {
     const currentTotalDiscount = appliedPromos.reduce((sum, p) => sum + p.discount, 0);
     const maxAllowedDiscount = Math.max(0, effectiveTotal - 1);
     const remainingBudget = Math.max(0, maxAllowedDiscount - currentTotalDiscount);
-    const safeDiscount = Math.min(calcDiscount, remainingBudget);
+    const safeDiscount = Number(Math.min(calcDiscount, remainingBudget).toFixed(2));
 
     if (safeDiscount <= 0 && calcDiscount > 0) {
       return { valid: false, message: 'Maximum eligible discount reached for this order.' };
@@ -1196,10 +1435,23 @@ export default function App() {
     const totalMrp = cart.reduce((acc, item) => acc + item.product.originalPrice * item.quantity, 0);
     const totalDiscount = cart.reduce((acc, item) => acc + (item.product.originalPrice - item.product.price) * item.quantity, 0);
     const cartTotal = totalMrp - totalDiscount;
-    const effectiveTotal = cartTotal > 0 ? cartTotal : (selectedProductDetails ? selectedProductDetails.price : 0);
-    const activeItems = cart.length > 0 
-      ? cart.map(i => ({ product: i.product, quantity: i.quantity }))
-      : (selectedProductDetails ? [{ product: selectedProductDetails, quantity: 1 }] : []);
+    const currentContextProduct = selectedProductDetails;
+    const currentProdPrice = currentContextProduct ? currentContextProduct.price : 0;
+    const effectiveTotal = cartTotal > 0 ? cartTotal : currentProdPrice;
+
+    const cartItemsMap = cart.map(i => ({ product: i.product, quantity: i.quantity }));
+    let activeItems: { product: Product; quantity: number }[] = [];
+
+    if (currentContextProduct) {
+      activeItems = [{ product: currentContextProduct, quantity: 1 }];
+      for (const ci of cartItemsMap) {
+        if (ci.product.id !== currentContextProduct.id && (!currentContextProduct.sku || ci.product.sku !== currentContextProduct.sku)) {
+          activeItems.push(ci);
+        }
+      }
+    } else {
+      activeItems = cartItemsMap;
+    }
 
     fetch('/api/promos/verify', {
       method: 'POST',
@@ -1232,24 +1484,29 @@ export default function App() {
     const totalMrp = cart.reduce((acc, item) => acc + item.product.originalPrice * item.quantity, 0);
     const totalDiscount = cart.reduce((acc, item) => acc + (item.product.originalPrice - item.product.price) * item.quantity, 0);
     const cartTotal = totalMrp - totalDiscount;
-    const effectiveTotal = cartTotal > 0 ? cartTotal : (selectedProductDetails ? selectedProductDetails.price : 0);
+    const currentContextProduct = selectedProductDetails;
+    const currentProdPrice = currentContextProduct ? currentContextProduct.price : 0;
+    const effectiveTotal = cartTotal > 0 ? cartTotal : currentProdPrice;
 
-    // Immediate client-side revocation when billing value changes:
-    // - Under 2000 rupees: don't show or keep FEAT2.0
-    // - Under 1300 rupees OR over 2000 rupees: don't show or keep FEAT6 (over 2000 user gets FEAT2.0 only)
-    // - Do not combine FEAT6 and FEAT2.0
-    // - Remove any legacy FEAT200 / FLAT200
-    let filteredPromos = appliedPromos.filter(p => {
-      const code = p.code.toUpperCase();
-      if (code === 'FEAT200' || code === 'FLAT200') return false;
-      if (code === 'FEAT2.0' && effectiveTotal <= 2000) return false;
-      if (code === 'FEAT6' && (effectiveTotal <= 1300 || effectiveTotal > 2000)) return false;
-      return true;
-    });
+    const cartItemsMap = cart.map(i => ({ product: i.product, quantity: i.quantity }));
+    let activeItems: { product: Product; quantity: number }[] = [];
 
-    if (filteredPromos.some(p => p.code.toUpperCase() === 'FEAT2.0')) {
-      filteredPromos = filteredPromos.filter(p => p.code.toUpperCase() !== 'FEAT6');
+    if (currentContextProduct) {
+      activeItems = [{ product: currentContextProduct, quantity: 1 }];
+      for (const ci of cartItemsMap) {
+        if (ci.product.id !== currentContextProduct.id && (!currentContextProduct.sku || ci.product.sku !== currentContextProduct.sku)) {
+          activeItems.push(ci);
+        }
+      }
+    } else {
+      activeItems = cartItemsMap;
     }
+    const activeProducts = activeItems.map(i => i.product || i);
+
+    // Prune ineligible coupons using the centralized helper:
+    // - Removes milestone codes that no longer qualify
+    // - Removes category coupons (like BEAUTIFULYOU) when active products are only Sarees
+    const filteredPromos = pruneIneligibleCoupons(appliedPromos, activeProducts, isFirstOrder, effectiveTotal);
 
     if (filteredPromos.length !== appliedPromos.length) {
       setAppliedPromos(filteredPromos);
@@ -1257,10 +1514,6 @@ export default function App() {
     }
 
     if (filteredPromos.length === 0) return;
-
-    const activeItems = cart.length > 0 
-      ? cart.map(i => ({ product: i.product, quantity: i.quantity }))
-      : (selectedProductDetails ? [{ product: selectedProductDetails, quantity: 1 }] : []);
 
     const timeoutId = setTimeout(() => {
       fetch('/api/promos/verify', {
@@ -1486,6 +1739,16 @@ export default function App() {
       console.warn('Firestore order save notice:', fsErr);
     }
 
+    // 1b. Deduct / redeem magic feathers if used for discount
+    if (orderData.feathersUsed && orderData.feathersUsed > 0) {
+      const customer = getStoredCustomerSession();
+      const userUid = currentUser?.uid || customer?.uid || '';
+      const userEmail = orderData.customerEmail || currentUser?.email || customer?.email || '';
+      redeemFeathers(userUid, userEmail, orderData.feathersUsed, newOrder.id).catch(e => {
+        console.warn('Failed to redeem feathers on server:', e);
+      });
+    }
+
     setOrders(prev => [newOrder, ...prev]);
 
     setProducts(prev => {
@@ -1526,7 +1789,7 @@ export default function App() {
       const notif: PushNotification = {
         id: 'notif-' + Date.now(),
         title: '🎉 Order Confirmed!',
-        message: `Your order #${newOrder.id} of ₹${finalAmount.toLocaleString('en-IN')} has been placed successfully.`,
+        message: `Your order #${newOrder.id} of ₹${(finalAmount ?? 0).toLocaleString('en-IN')} has been placed successfully.`,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         read: false,
         type: 'order'
@@ -1572,7 +1835,7 @@ export default function App() {
 
         const isPaid = data.order.paymentStatus === 'Refund Initiated' || data.order.paymentStatus === 'Refund Completed';
         const notifText = isPaid
-          ? `Order #${orderId} was cancelled. Shiprocket pickup revoked and automated refund of ₹${data.order.finalAmount.toLocaleString('en-IN')} initiated to your original ${data.order.paymentMethod} account.`
+          ? `Order #${orderId} was cancelled. Shiprocket pickup revoked and automated refund of ₹${(data.order.finalAmount ?? 0).toLocaleString('en-IN')} initiated to your original ${data.order.paymentMethod} account.`
           : `Order #${orderId} was cancelled. Shiprocket pickup revoked. No payment collected (Cash on Delivery).`;
 
         setNotifications(prev => {
@@ -1626,7 +1889,7 @@ export default function App() {
               location: 'Feat Central Operations',
               completed: true,
               description: (isPaid && !isCod)
-                ? `Order cancelled (${reason || 'Customer request'}). Shiprocket pickup revoked. Refund of ₹${existing.finalAmount.toLocaleString('en-IN')} initiated.`
+                ? `Order cancelled (${reason || 'Customer request'}). Shiprocket pickup revoked. Refund of ₹${(existing.finalAmount ?? 0).toLocaleString('en-IN')} initiated.`
                 : `Order cancelled (${reason || 'Customer request'}). Shiprocket pickup revoked. No payment collected (COD).`
             }
           ]
@@ -1682,13 +1945,23 @@ export default function App() {
 
     const customSku = prodData.sku && prodData.sku.trim() ? prodData.sku.trim() : '';
     const customId = prodData.id && prodData.id.trim() ? prodData.id.trim() : '';
-    const assignedSku = customSku || customId || `FEAT-${Math.floor(1000 + Math.random() * 9000)}`;
+    let assignedSku = customSku || customId || '';
+    if (!assignedSku) {
+      const catPrefix = `FEAT-${((prodData.category || 'KUR') as string).substring(0, 3).toUpperCase()}`;
+      let candidate = '';
+      let attempts = 0;
+      do {
+        candidate = `${catPrefix}-${Math.floor(1000 + Math.random() * 9000)}`;
+        attempts++;
+      } while (products.some(p => p.sku?.toLowerCase() === candidate.toLowerCase() || p.id === candidate) && attempts < 100);
+      assignedSku = candidate;
+    }
     const assignedId = customId || customSku || assignedSku;
 
     // Check if an existing product already shares this exact SKU
     const existingProduct = products.find(p => 
-      (p.sku && p.sku.trim().toLowerCase() === assignedSku.toLowerCase()) ||
-      p.id === assignedId
+      (customSku && p.sku && p.sku.trim().toLowerCase() === customSku.toLowerCase()) ||
+      (customId && p.id === customId)
     );
 
     if (existingProduct) {
@@ -1783,11 +2056,17 @@ export default function App() {
       setProducts(prev => prev.map(p => p.id === existingProduct.id ? mergedProduct : p));
 
       try {
+        const adminToken = getAdminToken();
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (adminToken) {
+          headers['x-admin-token'] = adminToken;
+          headers['Authorization'] = `Bearer ${adminToken}`;
+        }
         await Promise.allSettled([
           saveProductToFirestore(mergedProduct),
           fetch('/api/products', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers,
             body: JSON.stringify(mergedProduct)
           })
         ]);
@@ -1822,13 +2101,13 @@ export default function App() {
         : [getCategoryFallbackImage(prodData.category, prodData.collection, prodData.name)],
       description: prodData.description || 'Exclusive handcrafted designer ensemble with intricate zari & thread detailing.',
       fabric: prodData.fabric || 'Pure Cotton Silk Blend',
-      length: (prodData.length && prodData.length.trim() !== '') ? prodData.length.trim() : undefined,
+      ...(prodData.length && prodData.length.trim() !== '' ? { length: prodData.length.trim() } : {}),
       careInstructions: (prodData.careInstructions && prodData.careInstructions.trim() !== '') ? prodData.careInstructions.trim() : '',
       sizes,
       sizeStock: finalSizeStock,
       colors: prodData.colors || [],
       colorVariants: prodData.colorVariants || [],
-      primaryColorName: (prodData.primaryColorName && prodData.primaryColorName.trim() !== '') ? prodData.primaryColorName.trim() : undefined,
+      ...(prodData.primaryColorName && prodData.primaryColorName.trim() !== '' ? { primaryColorName: prodData.primaryColorName.trim() } : {}),
       isFeatured: prodData.isFeatured ?? prodData.isfeatherd ?? false,
       isfeatherd: prodData.isfeatherd ?? prodData.isFeatured ?? false,
       isTrending: prodData.isTrending ?? true,
@@ -1836,16 +2115,37 @@ export default function App() {
       reviews: []
     };
 
-    // 1. Immediately update in-memory state
+    // 1. Immediately update in-memory state and lock into recent local products tracker
+    recentLocalProductsRef.current.set(newProduct.id, { product: newProduct, timestamp: Date.now() });
+    if (newProduct.sku) {
+      recentLocalProductsRef.current.set(newProduct.sku, { product: newProduct, timestamp: Date.now() });
+    }
+    deletedProductIdsRef.current.delete(newProduct.id);
+    if (newProduct.sku) deletedProductIdsRef.current.delete(newProduct.sku);
+
     setProducts(prev => [newProduct, ...prev.filter(p => p.id !== newProduct.id)]);
+    try {
+      const currentCache = JSON.parse(localStorage.getItem('feat_catalog_cache_v3') || '[]');
+      if (Array.isArray(currentCache)) {
+        const updated = deduplicateProducts([newProduct, ...currentCache]);
+        localStorage.setItem('feat_catalog_cache_v3', JSON.stringify(updated));
+        sessionStorage.setItem('feat_catalog_cache_v3', JSON.stringify(updated));
+      }
+    } catch (e) {}
 
     // 2. Persist to Firestore & Server concurrently in background
     try {
+      const adminToken = getAdminToken();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (adminToken) {
+        headers['x-admin-token'] = adminToken;
+        headers['Authorization'] = `Bearer ${adminToken}`;
+      }
       await Promise.allSettled([
         saveProductToFirestore(newProduct),
         fetch('/api/products', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify(newProduct)
         })
       ]);
@@ -1861,42 +2161,52 @@ export default function App() {
 
     const hasLengthKey = 'length' in updatedData;
     const finalLength = hasLengthKey
-      ? ((updatedData.length && updatedData.length.trim() !== '') ? updatedData.length.trim() : undefined)
+      ? ((updatedData.length && updatedData.length.trim() !== '') ? updatedData.length.trim() : '')
       : undefined;
 
     const hasPrimaryColorKey = 'primaryColorName' in updatedData;
     const finalPrimaryColor = hasPrimaryColorKey
-      ? ((updatedData.primaryColorName && updatedData.primaryColorName.trim() !== '') ? updatedData.primaryColorName.trim() : undefined)
+      ? ((updatedData.primaryColorName && updatedData.primaryColorName.trim() !== '') ? updatedData.primaryColorName.trim() : '')
       : undefined;
 
-    const updatedPayload = {
+    const updatedPayload: any = {
       ...updatedData,
       ...(hasLengthKey ? { length: finalLength } : {}),
       ...(hasPrimaryColorKey ? { primaryColorName: finalPrimaryColor } : {}),
       ...(assignedSku ? { sku: assignedSku } : {})
     };
+    if (hasLengthKey && !finalLength) {
+      delete updatedPayload.length;
+    }
+    if (hasPrimaryColorKey && !finalPrimaryColor) {
+      delete updatedPayload.primaryColorName;
+    }
 
     // Find target product to merge for Firestore
     const existing = products.find(p => p.id === productId);
-    if (existing) {
-      const merged = { ...existing, ...updatedPayload };
-      if (hasLengthKey && !finalLength) {
-        delete merged.length;
-      }
-      if (hasPrimaryColorKey && !finalPrimaryColor) {
-        delete (merged as any).primaryColorName;
-      }
-      try {
-        await saveProductToFirestore(merged);
-      } catch (fsErr) {
-        console.warn('Firestore update notice:', fsErr);
-      }
+    const productToSave = existing ? { ...existing, ...updatedPayload } : { id: productId, ...updatedPayload };
+    if (hasLengthKey && !finalLength) {
+      delete (productToSave as any).length;
+    }
+    if (hasPrimaryColorKey && !finalPrimaryColor) {
+      delete (productToSave as any).primaryColorName;
+    }
+    try {
+      await saveProductToFirestore(productToSave);
+    } catch (fsErr) {
+      console.warn('Firestore update notice:', fsErr);
     }
 
     try {
+      const adminToken = getAdminToken();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (adminToken) {
+        headers['x-admin-token'] = adminToken;
+        headers['Authorization'] = `Bearer ${adminToken}`;
+      }
       await fetch(`/api/products/${productId}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(updatedPayload)
       });
     } catch (err) {}
@@ -1906,6 +2216,10 @@ export default function App() {
       const merged = { ...p, ...updatedPayload };
       if (hasLengthKey && !finalLength) {
         delete merged.length;
+      }
+      recentLocalProductsRef.current.set(merged.id, { product: merged, timestamp: Date.now() });
+      if (merged.sku) {
+        recentLocalProductsRef.current.set(merged.sku, { product: merged, timestamp: Date.now() });
       }
       return merged;
     }));
@@ -2095,6 +2409,13 @@ export default function App() {
     const targetId = existing?.id || productId;
 
     // 1. Immediately update in-memory state
+    deletedProductIdsRef.current.add(targetId);
+    deletedProductIdsRef.current.add(productId);
+    if (targetSku) deletedProductIdsRef.current.add(targetSku);
+    recentLocalProductsRef.current.delete(targetId);
+    recentLocalProductsRef.current.delete(productId);
+    if (targetSku) recentLocalProductsRef.current.delete(targetSku);
+
     setProducts(prev => prev.filter(p => p.id !== targetId && p.id !== productId && (!targetSku || p.sku !== targetSku)));
 
     // 2. Direct Firestore document delete (deletes both ID and SKU if different)
@@ -2106,9 +2427,15 @@ export default function App() {
 
     // 3. Server API delete
     try {
-      await fetch(`/api/products/${encodeURIComponent(targetId)}`, { method: 'DELETE' });
+      const adminToken = getAdminToken();
+      const headers: Record<string, string> = {};
+      if (adminToken) {
+        headers['x-admin-token'] = adminToken;
+        headers['Authorization'] = `Bearer ${adminToken}`;
+      }
+      await fetch(`/api/products/${encodeURIComponent(targetId)}`, { method: 'DELETE', headers });
       if (targetSku && targetSku !== targetId) {
-        await fetch(`/api/products/${encodeURIComponent(targetSku)}`, { method: 'DELETE' }).catch(() => {});
+        await fetch(`/api/products/${encodeURIComponent(targetSku)}`, { method: 'DELETE', headers }).catch(() => {});
       }
     } catch (err) {}
   };
@@ -2308,6 +2635,48 @@ export default function App() {
     return deduplicateProducts(list);
   }, [products, featherdCollection, maxPriceFilter, inStockOnly, searchQuery, sortBy]);
 
+  // Progressive Pagination for Section 1 (Fashion Categories) & Section 2 (Curated Collections)
+  const [categoryVisibleCount, setCategoryVisibleCount] = useState<number>(10);
+  const [collectionVisibleCount, setCollectionVisibleCount] = useState<number>(10);
+
+  // Reset pagination when category, collection, or search filters change
+  useEffect(() => {
+    setCategoryVisibleCount(10);
+  }, [selectedCategory, searchQuery, maxPriceFilter, inStockOnly, sortBy]);
+
+  useEffect(() => {
+    setCollectionVisibleCount(10);
+  }, [featherdCollection, maxPriceFilter, sortBy]);
+
+  const visibleCategoryProducts = useMemo(() => {
+    return displayedProducts.slice(0, categoryVisibleCount);
+  }, [displayedProducts, categoryVisibleCount]);
+
+  const visibleFeatherdCollectionProducts = useMemo(() => {
+    return featherdCollectionProducts.slice(0, collectionVisibleCount);
+  }, [featherdCollectionProducts, collectionVisibleCount]);
+
+  // Dedicated page router helpers for "View More" navigation buttons
+  const getCategoryPath = (cat: string): string => {
+    const norm = (cat || '').toLowerCase().trim();
+    if (norm.includes('kurti')) return '/kurti';
+    if (norm.includes('saree') || norm.includes('sharee')) return '/sharee';
+    if (norm.includes('dress') || norm.includes('material')) return '/dress-materials';
+    if (norm.includes('indo') || norm.includes('western')) return '/indo-western';
+    if (norm.includes('suit') || norm.includes('anarkali')) return '/suit';
+    return '/kurti';
+  };
+
+  const getCollectionPath = (col: string): string => {
+    const norm = (col || '').toLowerCase().trim();
+    if (norm.includes('jashn')) return '/jashn';
+    if (norm.includes('firdausi')) return '/firdausi';
+    if (norm.includes('9') || norm.includes('five')) return '/9-to-fivers';
+    if (norm.includes('deal') || norm.includes('maange')) return '/deal-maange-more';
+    if (norm.includes('present') || norm.includes('gift')) return '/present-is-gifted';
+    return '/jashn';
+  };
+
   // New Arrivals Products (Auto Carousel)
   const finalNewArrivals = useMemo(() => {
     const newArrivalsProducts = products.filter(p => 
@@ -2360,6 +2729,15 @@ export default function App() {
   return (
     <div className="min-h-screen bg-gradient-to-b from-[#fff0f7] via-[#ffeaf4] via-40% to-[#fff5fa] text-gray-900 font-sans flex flex-col selection:bg-pink-300 selection:text-pink-950">
       
+      {/* Loading Screen before opening website with animated feathers & Wear Feat, Wear Confidence */}
+      {/* Product pages (?product=) display their own dedicated ProductPageSkeleton instead */}
+      {isLoadingScreenActive && !activeUrlProductId && (
+        <LoadingScreen
+          onLoaded={() => setIsLoadingScreenActive(false)}
+          isProductsLoaded={!isLoadingProducts && products.length > 0}
+        />
+      )}
+
       {/* Top Banner Ribbon above Navbar */}
       <GlowingRibbon
         onOpenOfferModal={() => setIsOfferModalOpen(true)}
@@ -2405,6 +2783,7 @@ export default function App() {
           allProducts={products}
           orders={orders}
           currentUser={currentUser}
+          isFirstOrder={isFirstOrder}
           onBack={() => handleSelectProduct(null)}
           onSelectProduct={(p) => handleSelectProduct(p)}
           onAddToCart={(prod, size, color, quantity = 1) => {
@@ -2441,6 +2820,34 @@ export default function App() {
           }}
           promos={promos}
         />
+      ) : activeUrlProductId ? (
+        /* Dedicated Product Page Skeleton Loading Screen */
+        isLoadingProducts || products.length === 0 ? (
+          <ProductPageSkeleton
+            productId={activeUrlProductId}
+            onBack={() => handleSelectProduct(null)}
+          />
+        ) : (
+          /* Products loaded from Firestore, but requested activeUrlProductId was not found */
+          <div className="min-h-[60vh] flex flex-col items-center justify-center p-6 text-center max-w-lg mx-auto space-y-4">
+            <div className="w-16 h-16 rounded-3xl bg-pink-100 flex items-center justify-center text-pink-700 shadow-md">
+              <Feather className="w-8 h-8 stroke-[1.75]" />
+            </div>
+            <h2 className="text-2xl font-black font-serif text-pink-950">Product Not Available</h2>
+            <p className="text-sm text-gray-600 leading-relaxed">
+              The requested royal attire <span className="font-mono font-bold text-pink-800">#{activeUrlProductId}</span> may have sold out or been retired from our active catalog.
+            </p>
+            <div className="flex items-center gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => handleSelectProduct(null)}
+                className="px-6 py-2.5 rounded-xl font-black bg-[#ff2a85] hover:bg-[#e11d48] text-white transition-all shadow-md active:scale-95 cursor-pointer"
+              >
+                Browse Sarees & Kurtis Collection
+              </button>
+            </div>
+          </div>
+        )
       ) : currentPath.includes('checkout') ? (
         <CheckoutPage
           cartItems={cart}
@@ -2474,6 +2881,7 @@ export default function App() {
             handleNavigateToPath(`/order-details?id=${orderId}`);
           }}
           promos={promos}
+          isFirstOrder={isFirstOrder}
           onCompleteOrder={handleCompleteOrder}
         />
       ) : (currentPath.includes('account') || currentPath.includes('dashboard') || currentPath.includes('my-orders')) ? (
@@ -2622,12 +3030,12 @@ export default function App() {
           onToggleWishlist={handleToggleWishlist}
           onNavigateCollection={(slug) => handleNavigateToPath(`/${slug}`)}
         />
-      ) : (currentPath.includes('kurti') || currentPath.includes('sharee') || currentPath.includes('dress-materials') || currentPath.includes('indo-western') || currentPath.includes('suit')) ? (
+      ) : (currentPath.includes('kurti') || currentPath.includes('sharee') || currentPath.includes('saree') || currentPath.includes('dress-materials') || currentPath.includes('indo-western') || currentPath.includes('suit')) ? (
         <CategoryExplorePage
           categorySlug={
             currentPath.includes('dress-materials') ? 'dress-materials' :
             currentPath.includes('indo-western') ? 'indo-western' :
-            currentPath.includes('sharee') ? 'sharee' :
+            (currentPath.includes('sharee') || currentPath.includes('saree')) ? 'sharee' :
             currentPath.includes('suit') ? 'suit' :
             'kurti'
           }
@@ -2725,8 +3133,15 @@ export default function App() {
                 <span className="w-2.5 h-6 rounded-full bg-gradient-to-b from-[#ff2a85] to-amber-400 inline-block" />
                 <span>{selectedCategory !== 'All' ? `${selectedCategory} Category` : 'Fashion Categories'}</span>
               </h2>
-              <p className="text-xs text-pink-900/70 font-medium mt-0.5 pl-4">
-                {displayedProducts.length} items available in {selectedCategory === 'All' ? 'all categories' : selectedCategory}
+              <p className="text-xs text-pink-900/70 font-medium mt-0.5 pl-4 flex items-center gap-1.5">
+                {isLoadingProducts && products.length === 0 ? (
+                  <span className="inline-flex items-center gap-1.5 text-[#e51975] font-semibold animate-pulse">
+                    <Sparkles className="w-3.5 h-3.5 text-amber-500 fill-amber-400" />
+                    Curating luxury catalog...
+                  </span>
+                ) : (
+                  `Showing ${Math.min(categoryVisibleCount, displayedProducts.length)} of ${displayedProducts.length} items in ${selectedCategory === 'All' ? 'all categories' : selectedCategory}`
+                )}
               </p>
             </div>
 
@@ -2796,7 +3211,12 @@ export default function App() {
         </div>
 
         {/* Product Cards Grid for Section 1 (Fashion Categories) */}
-        {displayedProducts.length === 0 ? (
+        {isLoadingProducts && products.length === 0 ? (
+          <ProductGridSkeleton
+            count={10}
+            title={`Curating ${selectedCategory !== 'All' ? selectedCategory : 'Royal Handcrafted Ethnic'} Collection...`}
+          />
+        ) : displayedProducts.length === 0 ? (
           <div className="bg-white rounded-2xl border border-pink-100 p-12 text-center space-y-3 shadow-sm">
             <div className="w-16 h-16 bg-pink-50 text-pink-600 rounded-full flex items-center justify-center mx-auto text-3xl">
               🔍
@@ -2817,22 +3237,89 @@ export default function App() {
             </button>
           </div>
         ) : (
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 sm:gap-4">
-            {displayedProducts.map((product) => (
-              <ProductCard
-                key={`disp-${product.id}`}
-                product={product}
-                onSelect={(p) => handleSelectProduct(p)}
-                onAddToCart={handleAddToCart}
-                isWishlisted={wishlist.some(w => w.id === product.id)}
-                onToggleWishlist={handleToggleWishlist}
-              />
-            ))}
-          </div>
+          <>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 sm:gap-4">
+              {visibleCategoryProducts.map((product) => (
+                <ProductCard
+                  key={`disp-${product.id}`}
+                  product={product}
+                  onSelect={(p) => handleSelectProduct(p)}
+                  onAddToCart={handleAddToCart}
+                  isWishlisted={wishlist.some(w => w.id === product.id)}
+                  onToggleWishlist={handleToggleWishlist}
+                />
+              ))}
+
+              {/* Skeleton Product Card at the end of the batch acting as Load More */}
+              {categoryVisibleCount < displayedProducts.length && (
+                <LoadMoreSkeletonCard
+                  onLoadMore={() => setCategoryVisibleCount(prev => Math.min(prev + 10, displayedProducts.length))}
+                  remainingCount={displayedProducts.length - categoryVisibleCount}
+                  batchSize={Math.min(10, displayedProducts.length - categoryVisibleCount)}
+                  theme="light"
+                />
+              )}
+            </div>
+
+            {/* Section 1 Pagination & View More Action Bar */}
+            {displayedProducts.length > 0 && (
+              <div className="pt-6 pb-2 flex flex-col items-center gap-3">
+                {/* Progress Indicator */}
+                <div className="flex items-center gap-2 text-xs font-bold text-gray-700 bg-white/90 px-4 py-1.5 rounded-full border border-pink-200/80 shadow-xs">
+                  <span>Showing</span>
+                  <span className="text-[#e51975] font-black">{Math.min(categoryVisibleCount, displayedProducts.length)}</span>
+                  <span>of</span>
+                  <span className="text-[#e51975] font-black">{displayedProducts.length}</span>
+                  <span>products in {selectedCategory === 'All' ? 'catalog' : selectedCategory}</span>
+                </div>
+
+                {/* Progress Bar */}
+                <div className="w-56 max-w-full h-1.5 bg-pink-100 rounded-full overflow-hidden">
+                  <div 
+                    className="h-full bg-gradient-to-r from-[#ff2a85] to-amber-500 rounded-full transition-all duration-300"
+                    style={{ width: `${Math.min(100, Math.round((Math.min(categoryVisibleCount, displayedProducts.length) / Math.max(1, displayedProducts.length)) * 100))}%` }}
+                  />
+                </div>
+
+                {/* Action Controls */}
+                <div className="flex flex-wrap items-center justify-center gap-3 w-full sm:w-auto">
+                  {/* Load Less */}
+                  {categoryVisibleCount > 10 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCategoryVisibleCount(10);
+                        const el = document.getElementById('fashion-categories-section');
+                        if (el) el.scrollIntoView({ behavior: 'smooth' });
+                      }}
+                      className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-5 py-3 rounded-2xl bg-white text-gray-700 hover:text-pink-950 border border-pink-200/90 font-extrabold text-xs hover:bg-pink-50 shadow-xs active:scale-[0.98] transition-all"
+                    >
+                      <ChevronUp className="w-4 h-4 text-[#e51975] stroke-[2.5]" />
+                      <span>Reset to 10 Products</span>
+                    </button>
+                  )}
+
+                  {/* View More in Dedicated Category Page */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const target = getCategoryPath(selectedCategory);
+                      handleNavigateToPath(target);
+                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                    }}
+                    className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-6 py-3 rounded-2xl bg-gradient-to-r from-pink-950 via-pink-900 to-amber-950 text-amber-200 hover:text-amber-100 border border-amber-300/40 font-extrabold text-xs shadow-md hover:shadow-xl hover:border-amber-300/80 active:scale-[0.98] transition-all group"
+                  >
+                    <span>View More in {selectedCategory !== 'All' ? `${selectedCategory} Page` : 'Dedicated Catalog'}</span>
+                    <ArrowRight className="w-4 h-4 text-amber-300 group-hover:translate-x-1 transition-transform" />
+                  </button>
+                </div>
+              </div>
+            )}
+          </>
         )}
 
         {/* Section 2: Curated Special Collections Showcase Section */}
-        <div className="relative overflow-hidden rounded-3xl bg-gradient-to-r from-pink-950 via-pink-900 to-amber-950 border border-amber-300/40 shadow-2xl p-5 sm:p-6 text-amber-100 transition-all mt-10 space-y-6">
+        <div id="featured-collections-section" className="relative overflow-hidden rounded-3xl bg-gradient-to-r from-pink-950 via-pink-900 to-amber-950 border border-amber-300/40 shadow-2xl p-5 sm:p-6 text-amber-100 transition-all mt-10 space-y-6">
           {/* Subtle background ambient glows */}
           <div className="absolute -top-16 -right-16 w-56 h-56 bg-amber-400/10 rounded-full blur-3xl pointer-events-none" />
           <div className="absolute -bottom-16 -left-16 w-56 h-56 bg-pink-500/10 rounded-full blur-3xl pointer-events-none" />
@@ -2845,7 +3332,11 @@ export default function App() {
                   <span>Featured Collections</span>
                 </h3>
                 <p className="text-xs text-amber-100/70 mt-0.5">
-                  Exclusive items curated for special themes and festive occasions
+                  {isLoadingProducts && products.length === 0 ? (
+                    'Curating luxury themed collections...'
+                  ) : (
+                    `Showing ${Math.min(collectionVisibleCount, featherdCollectionProducts.length)} of ${featherdCollectionProducts.length} items in ${featherdCollection === 'All' ? 'all collections' : featherdCollection}`
+                  )}
                 </p>
               </div>
               <div>
@@ -2958,13 +3449,15 @@ export default function App() {
 
           {/* Items Grid for Selected featherd Collection */}
           <div className="relative z-10 pt-2">
-            {featherdCollectionProducts.length === 0 ? (
+            {isLoadingProducts && products.length === 0 ? (
+              <FeaturedCollectionSkeleton count={5} />
+            ) : featherdCollectionProducts.length === 0 ? (
               <div className="bg-white/5 rounded-2xl border border-amber-300/20 p-8 text-center text-amber-200 text-xs font-medium">
                 No items found in this collection currently.
               </div>
             ) : (
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 sm:gap-4">
-                {featherdCollectionProducts.map((product) => (
+                {visibleFeatherdCollectionProducts.map((product) => (
                   <ProductCard
                     key={`col-${product.id}`}
                     product={product}
@@ -2974,6 +3467,71 @@ export default function App() {
                     onToggleWishlist={handleToggleWishlist}
                   />
                 ))}
+
+                {/* Skeleton Product Card at the end of the batch acting as Load More */}
+                {collectionVisibleCount < featherdCollectionProducts.length && (
+                  <LoadMoreSkeletonCard
+                    onLoadMore={() => setCollectionVisibleCount(prev => Math.min(prev + 10, featherdCollectionProducts.length))}
+                    remainingCount={featherdCollectionProducts.length - collectionVisibleCount}
+                    batchSize={Math.min(10, featherdCollectionProducts.length - collectionVisibleCount)}
+                    theme="dark"
+                  />
+                )}
+              </div>
+            )}
+
+            {/* Section 2 Pagination & View More Action Bar */}
+            {featherdCollectionProducts.length > 0 && (
+              <div className="pt-6 pb-2 flex flex-col items-center gap-3">
+                {/* Progress Indicator */}
+                <div className="flex items-center gap-2 text-xs font-bold text-amber-200/90 bg-white/10 px-4 py-1.5 rounded-full border border-amber-300/30">
+                  <span>Showing</span>
+                  <span className="text-amber-300 font-black">{Math.min(collectionVisibleCount, featherdCollectionProducts.length)}</span>
+                  <span>of</span>
+                  <span className="text-amber-300 font-black">{featherdCollectionProducts.length}</span>
+                  <span>curated pieces in {featherdCollection === 'All' ? 'collections' : featherdCollection}</span>
+                </div>
+
+                {/* Progress Bar */}
+                <div className="w-56 max-w-full h-1.5 bg-white/10 rounded-full overflow-hidden">
+                  <div 
+                    className="h-full bg-gradient-to-r from-amber-400 to-[#ff2a85] rounded-full transition-all duration-300"
+                    style={{ width: `${Math.min(100, Math.round((Math.min(collectionVisibleCount, featherdCollectionProducts.length) / Math.max(1, featherdCollectionProducts.length)) * 100))}%` }}
+                  />
+                </div>
+
+                {/* Action Controls */}
+                <div className="flex flex-wrap items-center justify-center gap-3 w-full sm:w-auto">
+                  {/* Load Less */}
+                  {collectionVisibleCount > 10 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCollectionVisibleCount(10);
+                        const el = document.getElementById('featured-collections-section');
+                        if (el) el.scrollIntoView({ behavior: 'smooth' });
+                      }}
+                      className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-5 py-3 rounded-2xl bg-white/10 hover:bg-white/20 text-amber-200 border border-amber-300/30 font-extrabold text-xs shadow-xs active:scale-[0.98] transition-all"
+                    >
+                      <ChevronUp className="w-4 h-4 text-amber-300 stroke-[2.5]" />
+                      <span>Reset to 10 Pieces</span>
+                    </button>
+                  )}
+
+                  {/* View More in Dedicated Collection Page */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const target = getCollectionPath(featherdCollection);
+                      handleNavigateToPath(target);
+                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                    }}
+                    className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-6 py-3 rounded-2xl bg-white text-pink-950 hover:bg-amber-50 font-black text-xs shadow-md hover:shadow-xl active:scale-[0.98] transition-all group"
+                  >
+                    <span>View More in {featherdCollection !== 'All' ? `${featherdCollection}` : 'Dedicated Collections'}</span>
+                    <ArrowRight className="w-4 h-4 text-[#e51975] group-hover:translate-x-1 transition-transform" />
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -3158,6 +3716,9 @@ export default function App() {
         isOpen={isOfferModalOpen}
         onClose={() => setIsOfferModalOpen(false)}
         promos={promos}
+        isFirstOrder={isFirstOrder}
+        onApplyPromoToCart={handleApplyPromo}
+        appliedPromos={appliedPromos}
       />
 
 
@@ -3170,6 +3731,7 @@ export default function App() {
         onRemoveItem={handleRemoveCartItem}
         appliedPromo={appliedPromo}
         appliedPromos={appliedPromos}
+        isFirstOrder={isFirstOrder}
         onApplyPromo={handleApplyPromo}
         onRemovePromo={handleRemovePromo}
         onExploreCategory={(cat) => {
@@ -3311,7 +3873,7 @@ export default function App() {
                   Price Limit
                 </label>
                 <span className="font-black text-pink-950 bg-pink-100 px-2.5 py-1 rounded-xl border border-pink-200">
-                  ₹{maxPriceFilter.toLocaleString('en-IN')}
+                  ₹{(maxPriceFilter ?? 10000).toLocaleString('en-IN')}
                 </span>
               </div>
               <input

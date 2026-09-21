@@ -17,6 +17,7 @@ interface CartDrawerProps {
   onRemovePromo: (code?: string) => void;
   onProceedToCheckout: () => void;
   promos: PromoCode[];
+  isFirstOrder?: boolean;
   onExploreCategory?: (category: string) => void;
   onExploreCollection?: (collection: string) => void;
 }
@@ -33,6 +34,7 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
   onRemovePromo,
   onProceedToCheckout,
   promos = [],
+  isFirstOrder = false,
   onExploreCategory,
   onExploreCollection
 }) => {
@@ -77,13 +79,13 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
   const totalMrp = cartItems.reduce((acc, item) => acc + item.product.originalPrice * item.quantity, 0);
   const totalDiscount = cartItems.reduce((acc, item) => acc + (item.product.originalPrice - item.product.price) * item.quantity, 0);
   const subtotal = totalMrp - totalDiscount;
-  const couponDiscount = Math.min(
+  const couponDiscount = Number(Math.min(
     Math.max(0, subtotal - 1),
     effectiveAppliedPromos.reduce((sum, p) => sum + p.discount, 0)
-  );
+  ).toFixed(2));
   // 100% Free delivery nationwide on all products (no extra shipping charges even under 1000 rupees)
   const deliveryFee = 0;
-  const finalPayable = Math.max(subtotal > 0 ? 1 : 0, subtotal - couponDiscount + deliveryFee);
+  const finalPayable = Number(Math.max(subtotal > 0 ? 1 : 0, subtotal - couponDiscount + deliveryFee).toFixed(2));
 
   const getItemImage = (item: CartItem) => {
     return getItemVariantImage(item.product, item.selectedColor);
@@ -204,10 +206,10 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
                     <div className="flex items-center justify-between mt-2">
                       <div className="flex items-baseline gap-1.5">
                         <span className="text-sm font-black text-gray-900">
-                          ₹{(item.product.price * item.quantity).toLocaleString('en-IN')}
+                          ₹{(((item.product?.price ?? 0) * (item.quantity || 1))).toLocaleString('en-IN')}
                         </span>
                         <span className="text-[10px] text-gray-400 line-through">
-                          ₹{(item.product.originalPrice * item.quantity).toLocaleString('en-IN')}
+                          ₹{(((item.product?.originalPrice ?? item.product?.price ?? 0) * (item.quantity || 1))).toLocaleString('en-IN')}
                         </span>
                         {item.quantity > 1 && (
                           <span className="text-[10px] font-extrabold text-pink-700 bg-pink-50 px-1.5 py-0.5 rounded border border-pink-200">
@@ -257,6 +259,7 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
                 onApplyPromo={onApplyPromo}
                 onRemovePromo={onRemovePromo}
                 variant="drawer"
+                isFirstOrder={isFirstOrder}
               />
 
               {/* Flipkart Style Price Details Breakdown */}
@@ -266,16 +269,16 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
                 </div>
                 <div className="flex justify-between text-gray-600">
                   <span>Total MRP ({cartItems.length} items)</span>
-                  <span>₹{totalMrp.toLocaleString('en-IN')}</span>
+                  <span>₹{(totalMrp ?? 0).toLocaleString('en-IN')}</span>
                 </div>
                 <div className="flex justify-between text-emerald-700 font-medium">
                   <span>Product Discount</span>
-                  <span>- ₹{totalDiscount.toLocaleString('en-IN')}</span>
+                  <span>- ₹{(totalDiscount ?? 0).toLocaleString('en-IN')}</span>
                 </div>
-                {appliedPromo && (
+                {effectiveAppliedPromos.length > 0 && (
                   <div className="flex justify-between text-emerald-700 font-medium">
-                    <span>Coupon Discount ({appliedPromo.code})</span>
-                    <span>- ₹{appliedPromo.discount.toLocaleString('en-IN')}</span>
+                    <span>Coupon Discount ({effectiveAppliedPromos.map(p => p.code).join(' + ')})</span>
+                    <span>- ₹{effectiveAppliedPromos.reduce((sum, p) => sum + (p.discount || 0), 0).toLocaleString('en-IN')}</span>
                   </div>
                 )}
                 <div className="flex justify-between text-gray-600">
@@ -289,7 +292,7 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
 
                 <div className="border-t border-dashed pt-2 flex justify-between font-black text-sm text-gray-900">
                   <span>Total Amount</span>
-                  <span className="text-pink-800">₹{finalPayable.toLocaleString('en-IN')}</span>
+                  <span className="text-pink-800">₹{(finalPayable ?? 0).toLocaleString('en-IN')}</span>
                 </div>
               </div>
             </>
@@ -301,7 +304,7 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
           <div className="p-4 bg-white border-t border-pink-100 shadow-lg flex items-center justify-between gap-3">
             <div>
               <p className="text-[10px] text-gray-400 font-medium uppercase">Total Payable</p>
-              <p className="text-lg font-black text-pink-800">₹{finalPayable.toLocaleString('en-IN')}</p>
+              <p className="text-lg font-black text-pink-800">₹{(finalPayable ?? 0).toLocaleString('en-IN')}</p>
             </div>
 
             <button

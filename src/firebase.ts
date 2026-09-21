@@ -93,7 +93,7 @@ export const signInWithGoogle = async () => {
       if (!userSnap.exists()) {
         await setDoc(userRef, {
           uid: user.uid,
-          email: user.email,
+          email: user.email || '',
           displayName: user.displayName || 'Feat Customer',
           photoURL: user.photoURL || '',
           createdAt: new Date().toISOString(),

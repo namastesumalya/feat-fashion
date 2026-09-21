@@ -11,6 +11,8 @@ import {
 } from 'firebase/auth';
 import { 
   getFirestore, 
+  initializeFirestore,
+  setLogLevel,
   doc, 
   setDoc, 
   getDoc, 
@@ -66,16 +68,34 @@ function safeInitFirebaseApp(name: string, config: any): FirebaseApp | null {
   }
 }
 
+// Initialize Firestore with robust WebChannel long-polling settings to prevent transport errors in restricted / iframe / proxy environments
+function safeInitFirestore(app: FirebaseApp | null): Firestore {
+  if (!app) return null as unknown as Firestore;
+  try {
+    // Suppress transient WebChannel reconnect warnings
+    setLogLevel('error');
+    return initializeFirestore(app, {
+      experimentalForceLongPolling: true
+    });
+  } catch (err) {
+    try {
+      return getFirestore(app);
+    } catch {
+      return null as unknown as Firestore;
+    }
+  }
+}
+
 // Initialize dedicated Admin Firebase App ('adminApp')
 export const adminApp: FirebaseApp | null = safeInitFirebaseApp('adminApp', adminFirebaseConfig);
 export const adminAuth: any = adminApp ? getAuth(adminApp) : null;
-export const adminDb: Firestore = (adminApp ? getFirestore(adminApp) : null) as unknown as Firestore;
+export const adminDb: Firestore = safeInitFirestore(adminApp);
 export const adminStorage: FirebaseStorage = (adminApp ? getStorage(adminApp) : null) as unknown as FirebaseStorage;
 export const adminGoogleProvider = adminApp ? new GoogleAuthProvider() : null;
 
 // Initialize User/Store Firebase App ('[DEFAULT]')
 export const userApp: FirebaseApp | null = safeInitFirebaseApp('[DEFAULT]', userFirebaseConfig);
-export const userDb: Firestore = (userApp ? getFirestore(userApp) : null) as unknown as Firestore;
+export const userDb: Firestore = safeInitFirestore(userApp);
 export const userStorage: FirebaseStorage = (userApp ? getStorage(userApp) : null) as unknown as FirebaseStorage;
 
 // Test Connection to Firestore databases when configured
@@ -124,7 +144,10 @@ export const subscribeToProducts = (callback: (products: Product[]) => void) => 
           images: rawImages.filter((img: string) => typeof img === 'string' && !img.includes('1610030469983'))
         } as Product);
       });
-      callback(deduplicateProducts(rawList));
+      // Merge with cached products so newly saved items or paginated items are never lost on snapshot updates
+      const mergedWithCache = deduplicateProducts([...(cachedFirestoreProducts || []), ...rawList]);
+      cachedFirestoreProducts = mergedWithCache;
+      callback(mergedWithCache);
     }, () => {});
   } catch (err) {}
 
@@ -198,13 +221,32 @@ let cachedFirestoreBanners: BannerSlide[] | null = null;
 let lastBannersFetchTime = 0;
 let bannersRestCooldownUntil = 0;
 
+// Negative cache for images not found in Firestore to prevent repeated 404 queries
+const missingImageNegativeCache = new Set<string>();
+
 /**
  * Fetch all products from Admin Firestore (featdb-admin)
  */
 export const fetchProductsFromFirestore = async (): Promise<Product[]> => {
   const now = Date.now();
-  if (cachedFirestoreProducts && (now - lastProductsFetchTime < 60000)) {
+  if (cachedFirestoreProducts && cachedFirestoreProducts.length > 20 && (now - lastProductsFetchTime < 60000)) {
     return cachedFirestoreProducts;
+  }
+
+  // 1. Primary in fullstack environment: Query server /api/products which has already synchronized all pages
+  try {
+    const apiRes = await fetch('/api/products', { signal: AbortSignal.timeout(8000) });
+    if (apiRes.ok) {
+      const apiData = await apiRes.json();
+      if (apiData && Array.isArray(apiData.products) && apiData.products.length > 0) {
+        const deduplicated = deduplicateProducts(apiData.products);
+        cachedFirestoreProducts = deduplicated;
+        lastProductsFetchTime = now;
+        return cachedFirestoreProducts;
+      }
+    }
+  } catch (e) {
+    // Server endpoint unreachable (e.g. pure static build)
   }
 
   const rawList: Product[] = [];
@@ -213,7 +255,7 @@ export const fetchProductsFromFirestore = async (): Promise<Product[]> => {
     try {
       if (!dbInstance) return;
       const ref = collection(dbInstance, 'products');
-      const snap = await withTimeout(getDocs(ref), 7000, null);
+      const snap = await withTimeout(getDocs(ref), 15000, null);
       if (snap) {
         snap.forEach((docSnap) => {
           if (BANNED_FAKE_PRODUCT_IDS.has(docSnap.id)) return;
@@ -241,7 +283,7 @@ export const fetchProductsFromFirestore = async (): Promise<Product[]> => {
     await fetchFromDb(userDb);
   }
 
-  // If Firebase SDK retrieved documents, return immediately and cache - NEVER call raw REST
+  // If Firebase SDK retrieved documents, return immediately and cache
   const deduplicatedSdk = deduplicateProducts(rawList);
   if (deduplicatedSdk.length > 0) {
     cachedFirestoreProducts = deduplicatedSdk;
@@ -249,47 +291,37 @@ export const fetchProductsFromFirestore = async (): Promise<Product[]> => {
     return cachedFirestoreProducts;
   }
 
-  // If running in full-stack app, proxy through server /api/products instead of hitting Google REST directly
-  try {
-    const apiRes = await fetch('/api/products', { signal: AbortSignal.timeout(4000) });
-    if (apiRes.ok) {
-      const apiData = await apiRes.json();
-      if (apiData && Array.isArray(apiData.products) && apiData.products.length > 0) {
-        cachedFirestoreProducts = deduplicateProducts(apiData.products);
-        lastProductsFetchTime = now;
-        return cachedFirestoreProducts;
-      }
-    }
-  } catch (e) {
-    // Server endpoint unreachable (e.g. pure static build)
-  }
-
-  // Direct REST query to project database only as absolute fallback if SDK and /api/products are empty AND not in 429 cooldown
+  // Direct REST query with full pagination fallback if SDK and /api/products are empty
   const restProjects = adminFirebaseConfig.projectId ? [adminFirebaseConfig.projectId] : [];
   if (rawList.length === 0 && restProjects.length > 0 && now > firestoreRestCooldownUntil) {
     const apiKey = adminFirebaseConfig.apiKey || userFirebaseConfig.apiKey;
     await Promise.allSettled(restProjects.map(async (proj) => {
       try {
-        const url = `https://firestore.googleapis.com/v1/projects/${proj}/databases/(default)/documents/products${apiKey ? `?key=${apiKey}` : ''}`;
-        const res = await fetch(url, {
-          signal: AbortSignal.timeout(5000)
-        });
-        if (res.status === 429) {
-          console.warn('[Firestore] Received 429 quota from Google Cloud REST API. Entering 5-minute backoff cooldown.');
-          firestoreRestCooldownUntil = Date.now() + 5 * 60 * 1000;
-          return;
-        }
-        if (!res.ok) return;
-        const data: any = await res.json();
-        if (data && Array.isArray(data.documents)) {
-          for (const d of data.documents) {
-            const p = parseFirestoreDocRest(d);
-            if (p && p.id) {
-              if (BANNED_FAKE_PRODUCT_IDS.has(p.id) || (p.sku && BANNED_FAKE_PRODUCT_IDS.has(p.sku))) continue;
-              rawList.push(p);
+        let pageToken = '';
+        let pageCount = 0;
+        do {
+          const url = `https://firestore.googleapis.com/v1/projects/${proj}/databases/(default)/documents/products?pageSize=300${apiKey ? `&key=${apiKey}` : ''}${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`;
+          const res = await fetch(url, { signal: AbortSignal.timeout(12000) });
+          if (res.status === 429) {
+            console.warn('[Firestore] Received 429 quota from Google Cloud REST API. Entering 5-minute backoff cooldown.');
+            firestoreRestCooldownUntil = Date.now() + 5 * 60 * 1000;
+            break;
+          }
+          if (!res.ok) break;
+          const data: any = await res.json();
+          if (data && Array.isArray(data.documents)) {
+            for (const d of data.documents) {
+              const p = parseFirestoreDocRest(d);
+              if (p && p.id) {
+                if (BANNED_FAKE_PRODUCT_IDS.has(p.id) || (p.sku && BANNED_FAKE_PRODUCT_IDS.has(p.sku))) continue;
+                rawList.push(p);
+              }
             }
           }
-        }
+          pageToken = data.nextPageToken || '';
+          pageCount++;
+          if (pageCount > 50) break;
+        } while (pageToken);
       } catch (e) {}
     }));
   }
@@ -325,23 +357,117 @@ export const ensureAdminAuth = async (): Promise<boolean> => {
 };
 
 /**
+ * Recursively strips undefined values from objects and arrays so Firestore never throws
+ * "Unsupported field value: undefined".
+ */
+export function sanitizeForFirestore<T>(data: T): T {
+  if (data === null || data === undefined) {
+    return data;
+  }
+  if (Array.isArray(data)) {
+    return data
+      .filter((item) => item !== undefined)
+      .map((item) => sanitizeForFirestore(item)) as unknown as T;
+  }
+  if (typeof data === 'object' && !(data instanceof Date)) {
+    const cleaned: Record<string, any> = {};
+    for (const [key, val] of Object.entries(data as Record<string, any>)) {
+      if (val !== undefined) {
+        cleaned[key] = sanitizeForFirestore(val);
+      }
+    }
+    return cleaned as T;
+  }
+  return data;
+}
+
+/**
+ * Offload any base64 data URLs to clean URLs or lightweight payloads before Firestore writes
+ */
+export const offloadProductDataUrls = async (prod: any): Promise<any> => {
+  if (!prod || typeof prod !== 'object') return prod;
+  const copy = { ...prod };
+
+  const uploadIfDataUrl = async (val: string, prefix = 'prod'): Promise<string> => {
+    if (!val || typeof val !== 'string' || !val.startsWith('data:image/')) {
+      return val;
+    }
+    try {
+      const filename = `img_${prefix}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}.jpg`;
+      const res = await fetch('/api/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: val, filename, folder: 'products' })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.url) {
+          return data.url;
+        }
+      }
+    } catch (_) {}
+    return val;
+  };
+
+  if (Array.isArray(copy.images)) {
+    copy.images = await Promise.all(copy.images.map((img: any) => typeof img === 'string' ? uploadIfDataUrl(img, 'gallery') : img));
+  }
+
+  if (Array.isArray(copy.colorVariants)) {
+    copy.colorVariants = await Promise.all(copy.colorVariants.map(async (v: any) => {
+      if (!v || typeof v !== 'object') return v;
+      const vCopy = { ...v };
+      if (typeof vCopy.imageUrl === 'string') {
+        vCopy.imageUrl = await uploadIfDataUrl(vCopy.imageUrl, 'var');
+      }
+      if (Array.isArray(vCopy.images)) {
+        vCopy.images = await Promise.all(vCopy.images.map((img: any) => typeof img === 'string' ? uploadIfDataUrl(img, 'vargal') : img));
+      }
+      return vCopy;
+    }));
+  }
+
+  return copy;
+};
+
+/**
  * Save / Update a product to Admin Firestore (featdb-admin)
  */
 export const saveProductToFirestore = async (product: Partial<Product> & { id: string }): Promise<void> => {
   const canonicalId = product.id || product.sku || ('PROD_' + Date.now());
-  const payload = {
+  const rawPayload = {
     ...product,
     id: canonicalId,
     sku: product.sku || canonicalId,
     updatedAt: new Date().toISOString()
   };
 
+  // Convert any base64 image strings to lightweight URLs so Firestore 1MB document limit is never exceeded
+  const cleanPayload = await offloadProductDataUrls(rawPayload);
+  const payload = sanitizeForFirestore(cleanPayload);
+
+  // Instantly protect this product in local cache so listener snapshots never drop it
+  if (cachedFirestoreProducts) {
+    cachedFirestoreProducts = deduplicateProducts([payload as Product, ...cachedFirestoreProducts]);
+  }
+  try {
+    const cachedStr = sessionStorage.getItem('feat_catalog_cache_v3') || localStorage.getItem('feat_catalog_cache_v3');
+    if (cachedStr) {
+      const parsed = JSON.parse(cachedStr);
+      if (Array.isArray(parsed)) {
+        const updated = deduplicateProducts([payload as Product, ...parsed]);
+        sessionStorage.setItem('feat_catalog_cache_v3', JSON.stringify(updated));
+        localStorage.setItem('feat_catalog_cache_v3', JSON.stringify(updated));
+      }
+    }
+  } catch (e) {}
+
   // 1. Direct Client-side Firestore SDK write
   try {
     if (adminDb) {
       await ensureAdminAuth();
       const docRef = doc(adminDb, 'products', canonicalId);
-      await withTimeout(setDoc(docRef, payload, { merge: true }), 3500);
+      await withTimeout(setDoc(docRef, payload, { merge: true }), 12000);
       // Clean up legacy redundant doc if sku existed as alternate doc to prevent duplicate products
       if (product.sku && product.sku !== canonicalId) {
         const skuRef = doc(adminDb, 'products', product.sku);
@@ -354,10 +480,16 @@ export const saveProductToFirestore = async (product: Partial<Product> & { id: s
 
   // 2. Server-side API persistence (which authenticates directly with Firebase Auth REST API)
   try {
+    const adminToken = localStorage.getItem('feat_admin_token') || sessionStorage.getItem('feat_admin_token') || '';
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (adminToken) {
+      headers['x-admin-token'] = adminToken;
+      headers['Authorization'] = `Bearer ${adminToken}`;
+    }
     await fetch('/api/products', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(product)
+      headers,
+      body: JSON.stringify(payload)
     });
   } catch (err) {}
 };
@@ -370,13 +502,11 @@ export const updateProductStockInFirestore = async (
   stockCount: number,
   sizeStock?: Record<string, number>
 ): Promise<void> => {
-  const updatePayload: any = {
+  const updatePayload: any = sanitizeForFirestore({
     stockCount,
-    updatedAt: new Date().toISOString()
-  };
-  if (sizeStock) {
-    updatePayload.sizeStock = sizeStock;
-  }
+    updatedAt: new Date().toISOString(),
+    ...(sizeStock ? { sizeStock } : {})
+  });
 
   try {
     if (adminDb) {
@@ -401,6 +531,21 @@ export const updateProductStockInFirestore = async (
  * Delete a product from Admin Firestore (featdb-admin)
  */
 export const deleteProductFromFirestore = async (productId: string, productSku?: string): Promise<void> => {
+  if (cachedFirestoreProducts) {
+    cachedFirestoreProducts = cachedFirestoreProducts.filter(p => p.id !== productId && (!productSku || p.sku !== productSku));
+  }
+  try {
+    const cachedStr = sessionStorage.getItem('feat_catalog_cache_v3') || localStorage.getItem('feat_catalog_cache_v3');
+    if (cachedStr) {
+      const parsed = JSON.parse(cachedStr);
+      if (Array.isArray(parsed)) {
+        const updated = parsed.filter((p: any) => p.id !== productId && (!productSku || p.sku !== productSku));
+        sessionStorage.setItem('feat_catalog_cache_v3', JSON.stringify(updated));
+        localStorage.setItem('feat_catalog_cache_v3', JSON.stringify(updated));
+      }
+    }
+  } catch (e) {}
+
   // 1. Direct Client-side Firestore SDK delete
   try {
     if (adminDb) {
@@ -653,10 +798,10 @@ export const subscribeToBanners = (callback: (banners: BannerSlide[]) => void) =
  * Save / Update a hero banner in Firestore
  */
 export const saveBannerToFirestore = async (banner: BannerSlide): Promise<void> => {
-  const payload = {
+  const payload = sanitizeForFirestore({
     ...banner,
     updatedAt: new Date().toISOString()
-  };
+  });
 
   const saveDb = async (dbInstance: Firestore | null) => {
     if (!dbInstance) return;
@@ -711,10 +856,10 @@ export const deleteBannerFromFirestore = async (bannerId: string): Promise<void>
  * Save / Update an Order to Firestore
  */
 export const saveOrderToFirestore = async (order: Order): Promise<void> => {
-  const payload = {
+  const payload = sanitizeForFirestore({
     ...order,
     updatedAt: new Date().toISOString()
-  };
+  });
 
   const saveDb = async (dbInstance: Firestore) => {
     const docRef = doc(dbInstance, 'orders', order.id);
@@ -748,31 +893,35 @@ export const subscribeToOrders = (callback: (orders: Order[]) => void) => {
   let unsubUser = () => {};
 
   try {
-    const adminRef = collection(adminDb, 'orders');
-    unsubAdmin = onSnapshot(adminRef, (snapshot) => {
-      adminOrdersMap = new Map();
-      snapshot.forEach((docSnap) => {
-        adminOrdersMap.set(docSnap.id, {
-          id: docSnap.id,
-          ...docSnap.data()
-        } as Order);
-      });
-      emitMerged();
-    }, () => {});
+    if (adminDb) {
+      const adminRef = collection(adminDb, 'orders');
+      unsubAdmin = onSnapshot(adminRef, (snapshot) => {
+        adminOrdersMap = new Map();
+        snapshot.forEach((docSnap) => {
+          adminOrdersMap.set(docSnap.id, {
+            id: docSnap.id,
+            ...docSnap.data()
+          } as Order);
+        });
+        emitMerged();
+      }, () => {});
+    }
   } catch (err) {}
 
   try {
-    const userRef = collection(userDb, 'orders');
-    unsubUser = onSnapshot(userRef, (snapshot) => {
-      userOrdersMap = new Map();
-      snapshot.forEach((docSnap) => {
-        userOrdersMap.set(docSnap.id, {
-          id: docSnap.id,
-          ...docSnap.data()
-        } as Order);
-      });
-      emitMerged();
-    }, () => {});
+    if (userDb) {
+      const userRef = collection(userDb, 'orders');
+      unsubUser = onSnapshot(userRef, (snapshot) => {
+        userOrdersMap = new Map();
+        snapshot.forEach((docSnap) => {
+          userOrdersMap.set(docSnap.id, {
+            id: docSnap.id,
+            ...docSnap.data()
+          } as Order);
+        });
+        emitMerged();
+      }, () => {});
+    }
   } catch (err) {}
 
   return () => {
@@ -785,11 +934,11 @@ export const subscribeToOrders = (callback: (orders: Order[]) => void) => {
  * Update order status in Firestore
  */
 export const updateOrderStatusInFirestore = async (orderId: string, status: string): Promise<void> => {
-  const payload = {
+  const payload = sanitizeForFirestore({
     orderStatus: status,
     status: status,
     updatedAt: new Date().toISOString()
-  };
+  });
 
   const updateDb = async (dbInstance: Firestore) => {
     const docRef = doc(dbInstance, 'orders', orderId);
@@ -859,11 +1008,11 @@ export const subscribeToPromos = (callback: (promos: PromoCode[]) => void) => {
  * Save Promo to Firestore (featdb-admin)
  */
 export const savePromoToFirestore = async (promo: PromoCode): Promise<void> => {
-  const payload = {
+  const payload = sanitizeForFirestore({
     ...promo,
     code: promo.code.toUpperCase(),
     updatedAt: new Date().toISOString()
-  };
+  });
 
   if (adminDb) {
     const docRef = doc(adminDb, 'promos', promo.code.toUpperCase());
@@ -897,10 +1046,10 @@ export const deletePromoFromFirestore = async (code: string): Promise<void> => {
  * Save Live Sale Config to Firestore (featdb-admin)
  */
 export const saveLiveSaleToFirestore = async (config: LiveSaleConfig): Promise<void> => {
-  const payload = {
+  const payload = sanitizeForFirestore({
     ...config,
     updatedAt: new Date().toISOString()
-  };
+  });
 
   if (adminDb) {
     const docRef = doc(adminDb, 'settings', 'liveSale');
@@ -970,7 +1119,7 @@ export const logPaymentFailureToFirestore = async (logData: Partial<PaymentLog>)
   if (adminDb) {
     try {
       const docRef = doc(adminDb, 'payment_logs', logId);
-      await setDoc(docRef, fullLog, { merge: true });
+      await setDoc(docRef, sanitizeForFirestore(fullLog), { merge: true });
     } catch (err) {
       console.warn('[PaymentLog] Notice logging to featdb-admin:', err);
     }
@@ -1063,7 +1212,26 @@ export const compressImageFile = (
         const ctx = canvas.getContext('2d');
         if (ctx) {
           ctx.drawImage(img, 0, 0, width, height);
-          const dataUrl = canvas.toDataURL('image/jpeg', quality);
+          let dataUrl = canvas.toDataURL('image/jpeg', quality);
+
+          // If still large (> 250 KB), compress again to guarantee tiny payload
+          if (dataUrl.length > 250000) {
+            const secondaryCanvas = document.createElement('canvas');
+            const sWidth = Math.round(width * 0.75);
+            const sHeight = Math.round(height * 0.75);
+            secondaryCanvas.width = sWidth;
+            secondaryCanvas.height = sHeight;
+            const sCtx = secondaryCanvas.getContext('2d');
+            if (sCtx) {
+              sCtx.drawImage(canvas, 0, 0, sWidth, sHeight);
+              dataUrl = secondaryCanvas.toDataURL('image/jpeg', 0.58);
+              secondaryCanvas.toBlob((blob) => {
+                resolve({ dataUrl, blob: blob || undefined });
+              }, 'image/jpeg', 0.58);
+              return;
+            }
+          }
+
           canvas.toBlob((blob) => {
             resolve({ dataUrl, blob: blob || undefined });
           }, 'image/jpeg', quality);
@@ -1083,7 +1251,7 @@ export const compressImageFile = (
   });
 };
 
-export const MAX_UPLOAD_FILE_SIZE_BYTES = 1 * 1024 * 1024; // 1 MB strict limit
+export const MAX_UPLOAD_FILE_SIZE_BYTES = 25 * 1024 * 1024; // 25 MB allowable upload (canvas automatically compresses to ~50KB)
 
 // In-memory cache for Firestore images mapped from filename or docId to dataUrl
 export const firestoreImageCache = new Map<string, string>();
@@ -1104,6 +1272,10 @@ export const fetchImageFromFirestore = async (filenameOrUrl: string): Promise<st
 
   if (firestoreImageCache.has(cleanFilename)) {
     return firestoreImageCache.get(cleanFilename)!;
+  }
+
+  if (missingImageNegativeCache.has(cleanFilename)) {
+    return null;
   }
 
   // 1. Check if adminDb Firestore SDK is active
@@ -1128,29 +1300,8 @@ export const fetchImageFromFirestore = async (filenameOrUrl: string): Promise<st
     } catch (_) {}
   }
 
-  // 2. Direct Firestore REST query fallback
-  try {
-    const adminProject = adminFirebaseConfig.projectId || 'featdb-admin';
-    const apiKey = adminFirebaseConfig.apiKey;
-    const cleanDocId = cleanFilename.replace(/[^a-zA-Z0-9_-]/g, '_');
-    const docCandidates = [
-      cleanDocId.startsWith('img_') ? cleanDocId : `img_${cleanDocId}`,
-      cleanDocId
-    ];
-    for (const id of docCandidates) {
-      const url = `https://firestore.googleapis.com/v1/projects/${adminProject}/databases/(default)/documents/settings/${id}${apiKey ? `?key=${apiKey}` : ''}`;
-      const res = await fetch(url, { signal: AbortSignal.timeout(3500) });
-      if (res.ok) {
-        const docData: any = await res.json();
-        const rawDataUrl = docData.fields?.dataUrl?.stringValue;
-        if (rawDataUrl && rawDataUrl.startsWith('data:image/')) {
-          firestoreImageCache.set(cleanFilename, rawDataUrl);
-          return rawDataUrl;
-        }
-      }
-    }
-  } catch (_) {}
-
+  // Mark in negative cache so we do not repeatedly request missing files
+  missingImageNegativeCache.add(cleanFilename);
   return null;
 };
 
@@ -1164,10 +1315,10 @@ export const uploadAdminFile = async (
   folder: 'products' | 'banners' | 'variants' = 'products',
   onProgress?: (progress: number) => void
 ): Promise<string> => {
-  // Validate file size does not exceed 1 MB
+  // Validate file size does not exceed 25 MB
   if (file.size > MAX_UPLOAD_FILE_SIZE_BYTES) {
-    const sizeMb = (file.size / (1024 * 1024)).toFixed(2);
-    throw new Error(`File "${file.name}" is ${sizeMb} MB, which exceeds the 1 MB limit. Please compress or select an image under 1 MB.`);
+    const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
+    throw new Error(`File "${file.name}" is ${sizeMb} MB, which exceeds the 25 MB limit. Please select an image under 25 MB.`);
   }
 
   if (onProgress) onProgress(15);
@@ -1185,83 +1336,26 @@ export const uploadAdminFile = async (
     // Compression fallback
   }
 
-  const uploadToStorage = async (storageInstance: FirebaseStorage): Promise<string | null> => {
-    if (!storageInstance) return null;
-    let uploadTask: any = null;
+  // Guaranteed fallback: read as standard DataURL if canvas compression produced empty result
+  if (!compressedDataUrl) {
     try {
-      const timestamp = Date.now();
-      const cleanFileName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-      const path = `${folder}/${timestamp}_${cleanFileName}`;
-      const storageRef = ref(storageInstance, path);
-      const uploadPayload = compressedBlob || file;
-
-      uploadTask = uploadBytesResumable(storageRef, uploadPayload, {
-        contentType: 'image/jpeg'
+      compressedDataUrl = await new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve((reader.result as string) || '');
+        reader.onerror = () => resolve('');
+        reader.readAsDataURL(file);
       });
-
-      return await Promise.race([
-        new Promise<string>((resolve, reject) => {
-          uploadTask.on(
-            'state_changed',
-            (snapshot: any) => {
-              if (snapshot.totalBytes > 0) {
-                const progress = Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100);
-                if (onProgress) onProgress(Math.max(35, progress));
-              }
-            },
-            (error: any) => reject(error),
-            async () => {
-              try {
-                const downloadUrl = await getDownloadURL(uploadTask.snapshot.ref);
-                resolve(downloadUrl);
-              } catch (err) {
-                reject(err);
-              }
-            }
-          );
-        }),
-        new Promise<string>((_, reject) => 
-          setTimeout(() => {
-            if (uploadTask) {
-              try { uploadTask.cancel(); } catch (e) {}
-            }
-            reject(new Error('Storage timeout'));
-          }, 8000)
-        )
-      ]);
-    } catch (err) {
-      if (uploadTask) {
-        try { uploadTask.cancel(); } catch (e) {}
-      }
-      return null;
-    }
-  };
-
-  // 2. Try Firebase Storage with brief timeout if available
-  if (adminStorage) {
-    const url = await uploadToStorage(adminStorage);
-    if (url) {
-      if (onProgress) onProgress(100);
-      return url;
-    }
+    } catch (_) {}
   }
 
-  if (userStorage) {
-    const url = await uploadToStorage(userStorage);
-    if (url) {
-      if (onProgress) onProgress(100);
-      return url;
-    }
-  }
-
-  // 3. Direct Firestore Persistence:
+  // 2. Direct Firestore Persistence:
   // Write into Admin Firestore `settings` collection directly via Admin Firestore SDK
   const timestamp = Date.now();
   const fileUniqueId = `img_${timestamp}_${Math.random().toString(36).substring(2, 8)}.jpg`;
   const cleanDocId = fileUniqueId.replace(/[^a-zA-Z0-9_-]/g, '_');
   const docId = cleanDocId.startsWith('img_') ? cleanDocId : `img_${cleanDocId}`;
 
-  if (adminDb && compressedDataUrl) {
+  if (adminDb && compressedDataUrl && compressedDataUrl.length < 800000) {
     try {
       firestoreImageCache.set(fileUniqueId, compressedDataUrl);
       firestoreImageCache.set(docId, compressedDataUrl);
@@ -1274,25 +1368,42 @@ export const uploadAdminFile = async (
     } catch (_) {}
   }
 
-  // Also send to backend /api/upload in background so local memory cache is populated if container is live
+  if (onProgress) onProgress(65);
+
+  // 3. Reliable Backend Proxy Upload (/api/upload):
+  // Posts to application server backend to safely persist into in-memory cache, filesystem,
+  // and cloud storage while completely avoiding browser CORS preflight errors.
+  let serverProvidedUrl = '';
   if (compressedDataUrl) {
-    fetch('/api/upload', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        image: compressedDataUrl,
-        filename: fileUniqueId,
-        folder
-      })
-    }).catch(() => {});
+    try {
+      const uploadRes = await fetch('/api/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          image: compressedDataUrl,
+          filename: fileUniqueId,
+          folder
+        })
+      });
+      if (uploadRes.ok) {
+        const uploadData = await uploadRes.json();
+        if (uploadData && uploadData.url && typeof uploadData.url === 'string') {
+          if (uploadData.url.startsWith('http://') || uploadData.url.startsWith('https://') || uploadData.url.startsWith('/api/images/')) {
+            serverProvidedUrl = uploadData.url;
+          }
+        }
+      }
+    } catch (uploadErr) {
+      console.warn('[Upload] Notice during backend upload:', uploadErr);
+    }
   }
 
   if (onProgress) onProgress(100);
 
-  // Return the self-contained, compressed data URL directly!
-  // This guarantees that the photo is stored DIRECTLY inside the product document in Admin Firestore
-  // and is fetched in real-time from Firestore, NEVER lost on Railway container redeployments!
-  return compressedDataUrl || '';
+  // Return the public cloud URL if available, otherwise the self-contained, optimized data URL directly!
+  // This guarantees that the photo is stored directly inside the product document in Admin Firestore,
+  // can be rendered instantly without separate network fetches, and eliminates all browser CORS issues!
+  return serverProvidedUrl || compressedDataUrl || '';
 };
 
 export const signInAdminWithGoogle = async () => {

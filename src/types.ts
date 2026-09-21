@@ -183,9 +183,9 @@ export interface Order {
   finalAmount: number;
   deliveryAddress: DeliveryAddress;
   paymentMethod: 'PhonePe' | 'Razorpay' | 'UPI' | 'Card' | 'NetBanking' | 'COD' | string;
-  paymentStatus: 'Paid' | 'Pending' | 'Failed' | 'Refund Initiated' | 'Refund Completed' | 'Void';
+  paymentStatus: 'Paid' | 'Pending' | 'Failed' | 'Refund Initiated' | 'Refund Completed' | 'Void' | 'Pending Payment';
   orderStatus: 'Ordered' | 'Packed' | 'Shipped' | 'Out for Delivery' | 'Delivered' | 'Cancelled';
-  trackingHistory: OrderTrackingStep[];
+  trackingHistory?: OrderTrackingStep[];
   customerEmail: string;
   userId?: string;
   promoCodeUsed?: string;
@@ -216,7 +216,7 @@ export interface Order {
   shiprocketInvoiceUrl?: string;
   shiprocketStatus?: string;
   shiprocketPickupScheduled?: boolean;
-  shiprocketSyncStatus?: 'live_synced' | 'pending_pickup' | 'credentials_required' | 'pickup_failed' | 'simulated';
+  shiprocketSyncStatus?: 'live_synced' | 'pending_pickup' | 'credentials_required' | 'pickup_failed' | 'simulated' | 'pending_payment';
   shiprocketSyncError?: string;
   shiprocketPickupDate?: string;
   shiprocketPickupToken?: string;
@@ -330,15 +330,17 @@ export interface PaymentLog {
 export interface MagicFeatherTransaction {
   id: string;
   userId: string; // Recipient user ID who owns these feathers
-  type: 'referral_earned' | 'order_redeemed' | 'order_refunded';
-  orderId: string;
-  orderBillingValue: number; // The billing value of the friend's order
-  feathers: number; // e.g. 200 feathers
+  userEmail?: string;
+  type: 'referral_earned' | 'order_redeemed' | 'order_refunded' | 'signup_bonus';
+  orderId?: string;
+  orderBillingValue?: number; // The billing value of the friend's order
+  feathers: number; // e.g. 200 feathers or 40 feathers
   valueInRupees: number; // feathers * 0.50 (1 feather = 50 paisa)
   rewardPercent?: number; // Dynamic reward rate up to 5% (e.g. between 0.1% and 5.0%)
   status: 'pending' | 'credited' | 'cancelled' | 'redeemed';
-  createdAt: string; // ISO date of the purchase
-  unlocksAt: string; // ISO date = createdAt + 12 days (return maturity date)
+  description?: string;
+  createdAt: string; // ISO date of the transaction
+  unlocksAt: string; // ISO date = createdAt + 12 days (or immediate for signup bonus)
   friendMaskedEmail?: string;
   friendName?: string;
   cancellationReason?: string;

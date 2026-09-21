@@ -1,4 +1,5 @@
 import { Order } from '../types';
+import { getAdminToken } from './adminAuth';
 
 export interface ShiprocketLabelResponse {
   success: boolean;
@@ -23,12 +24,15 @@ export interface ShiprocketLabelResponse {
  */
 export async function fetchShiprocketThermalLabel(orderId: string): Promise<ShiprocketLabelResponse> {
   try {
-    const adminToken = localStorage.getItem('feat_admin_token') || '';
+    const adminToken = getAdminToken();
     const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/generate-shiprocket-label`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-admin-token': adminToken
+        ...(adminToken ? {
+          'x-admin-token': adminToken,
+          'Authorization': `Bearer ${adminToken}`
+        } : {})
       }
     });
 
@@ -56,12 +60,15 @@ export interface ShiprocketInvoiceResponse {
  */
 export async function fetchShiprocketInvoice(orderId: string): Promise<ShiprocketInvoiceResponse> {
   try {
-    const adminToken = localStorage.getItem('feat_admin_token') || '';
+    const adminToken = getAdminToken();
     const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/generate-shiprocket-invoice`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-admin-token': adminToken
+        ...(adminToken ? {
+          'x-admin-token': adminToken,
+          'Authorization': `Bearer ${adminToken}`
+        } : {})
       }
     });
 

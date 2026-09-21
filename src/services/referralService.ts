@@ -288,15 +288,45 @@ export async function createUserReferralCode(
 }
 
 /**
- * Link a friend's referral code to the current customer
+ * Link a friend's referral code to the current customer and credit ₹20 worth of Magic Feathers (40 feathers)
  */
 export async function linkReferralCode(
   userId: string, 
   userEmail: string, 
   friendCode: string, 
   token?: string
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; feathersAwarded?: number; rupeesAwarded?: number; message?: string }> {
   const cleanCode = friendCode.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (!cleanCode) {
+    return { success: false, error: 'Please enter a valid referral code.' };
+  }
+
+  const applyLocalSignupBonus = (current: UserReferralProfile) => {
+    current.referredByCode = cleanCode;
+    current.referredAt = current.referredAt || new Date().toISOString();
+    const hasBonus = (current.transactions || []).some(
+      t => t.orderId === 'SIGNUP_REFERRAL' || t.orderId === 'SIGNUP_BONUS'
+    );
+    if (!hasBonus) {
+      const bonusTx: MagicFeatherTransaction = {
+        id: 'mft_signup_' + Date.now(),
+        userId: userId || userEmail,
+        type: 'referral_earned',
+        orderId: 'SIGNUP_REFERRAL',
+        orderBillingValue: 0,
+        feathers: 40,
+        valueInRupees: 20,
+        status: 'credited',
+        createdAt: new Date().toISOString(),
+        unlocksAt: new Date().toISOString(),
+        friendName: cleanCode,
+        isNewCredit: true
+      };
+      current.transactions = [bonusTx, ...(current.transactions || [])];
+      current.availableFeathers = (current.availableFeathers || 0) + 40;
+      current.lifetimeEarnedFeathers = (current.lifetimeEarnedFeathers || 0) + 40;
+    }
+  };
 
   try {
     const res = await fetch('/api/referral/link-code', {
@@ -318,82 +348,79 @@ export async function linkReferralCode(
     }
 
     const current = getLocalReferralData(userId, userEmail);
-    current.referredByCode = cleanCode;
-    current.referredAt = new Date().toISOString();
+    applyLocalSignupBonus(current);
     saveLocalReferralData(current);
     clearPendingReferralCode();
 
-    return { success: true };
+    return { 
+      success: true, 
+      feathersAwarded: data.feathersAwarded ?? 40,
+      rupeesAwarded: data.rupeesAwarded ?? 20,
+      message: data.message
+    };
   } catch (_) {
     const current = getLocalReferralData(userId, userEmail);
-    current.referredByCode = cleanCode;
-    current.referredAt = new Date().toISOString();
+    applyLocalSignupBonus(current);
     saveLocalReferralData(current);
     clearPendingReferralCode();
-    return { success: true };
+    return { success: true, feathersAwarded: 40, rupeesAwarded: 20 };
   }
 }
 
 /**
- * Fast-forward simulation of 12 days for testing maturity and animations
+ * Acknowledge to the backend that newly credited feathers have been celebrated in UI
  */
-export async function fastForwardTransactionDev(
-  transactionId: string, 
-  userId: string, 
-  userEmail: string
-): Promise<UserReferralProfile> {
+export async function acknowledgeFeatherCredit(transactionId: string): Promise<boolean> {
   try {
-    const res = await fetch('/api/referral/fast-forward-dev', {
+    const res = await fetch('/api/referral/ack-credit', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ transactionId, userId, email: userEmail })
+      body: JSON.stringify({ transactionId })
+    });
+    return res.ok;
+  } catch (_) {
+    return false;
+  }
+}
+
+export async function redeemFeathers(
+  userId: string,
+  userEmail: string,
+  feathers: number,
+  orderId?: string
+): Promise<{ success: boolean; redeemedFeathers?: number; discountRupees?: number }> {
+  try {
+    const res = await fetch('/api/referral/redeem', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId, email: userEmail, feathers, orderId })
     });
     if (res.ok) {
       const data = await res.json();
-      if (data.profile) {
-        saveLocalReferralData(data.profile);
-        return data.profile;
+      // Update local storage balance
+      const current = getLocalReferralData(userId, userEmail);
+      if (data.redeemedFeathers) {
+        current.transactions.unshift({
+          id: 'ftx-red-' + Date.now(),
+          userId: userId || userEmail,
+          userEmail,
+          feathers: data.redeemedFeathers,
+          valueInRupees: data.discountRupees || data.redeemedFeathers * FEATHER_RUPEE_VALUE,
+          type: 'order_redeemed',
+          status: 'redeemed',
+          orderId,
+          description: `Redeemed ${data.redeemedFeathers} Magic Feathers for discount`,
+          createdAt: new Date().toISOString(),
+          unlocksAt: new Date().toISOString()
+        });
+        current.availableFeathers = Math.max(0, (current.availableFeathers || 0) - data.redeemedFeathers);
+        current.totalRedeemedFeathers = (current.totalRedeemedFeathers || 0) + data.redeemedFeathers;
+        saveLocalReferralData(current);
       }
+      return data;
     }
   } catch (_) {}
 
-  // Local fallback fast forward
-  const current = getLocalReferralData(userId, userEmail);
-  current.transactions = current.transactions.map(t => {
-    if (t.id === transactionId && t.status === 'pending') {
-      return { ...t, status: 'credited', isNewCredit: true };
-    }
-    return t;
-  });
-
-  const availableFeathers = current.transactions
-    .filter(t => t.status === 'credited')
-    .reduce((sum, t) => sum + t.feathers, 0) -
-    current.transactions
-      .filter(t => t.status === 'redeemed')
-      .reduce((sum, t) => sum + t.feathers, 0);
-
-  current.availableFeathers = Math.max(0, availableFeathers);
-  current.pendingFeathers = Math.max(0, current.transactions.filter(t => t.status === 'pending').reduce((s, t) => s + t.feathers, 0));
-  saveLocalReferralData(current);
-  return current;
+  return { success: false };
 }
 
-export async function fastForwardFeatherMaturity(
-  transactionId: string, 
-  days: number = 12
-): Promise<{ success: boolean; profile?: UserReferralProfile }> {
-  try {
-    const res = await fetch('/api/referral/fast-forward-dev', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ transactionId, days })
-    });
-    if (res.ok) {
-      const data = await res.json();
-      return { success: true, profile: data.profile };
-    }
-  } catch (_) {}
-
-  return { success: true };
-}

@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { 
   Lock, Mail, User, Phone, ArrowRight, ShieldCheck, CheckCircle2, 
-  AlertCircle, Eye, EyeOff, Home, Sparkles, Package, HelpCircle, ArrowLeft
+  AlertCircle, Eye, EyeOff, Home, Sparkles, Package, HelpCircle, ArrowLeft, Gift
 } from 'lucide-react';
 import { 
   signInCustomer, 
@@ -11,6 +11,8 @@ import {
   CustomerSession 
 } from '../services/authService';
 import { isSilentAuthCancellation, getCleanAuthErrorMessage } from '../utils/authErrors';
+import { getPendingReferralCode } from '../services/referralService';
+import { triggerFeatherAnimation } from './FloatingFeatherAnimation';
 
 interface AccountAuthBarrierProps {
   onAuthSuccess?: (session: CustomerSession) => void;
@@ -36,6 +38,7 @@ export const AccountAuthBarrier: React.FC<AccountAuthBarrierProps> = ({
   const [password, setPassword] = useState('');
   const [fullName, setFullName] = useState('');
   const [phone, setPhone] = useState('');
+  const [referralCode, setReferralCode] = useState(() => getPendingReferralCode() || '');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -57,10 +60,20 @@ export const AccountAuthBarrier: React.FC<AccountAuthBarrierProps> = ({
     try {
       const session = await signInCustomerWithGoogle();
       if (session) {
-        setSuccessMsg(`Welcome, ${session.displayName || 'Valued Patron'}! Opening your dashboard...`);
+        const pendingRef = getPendingReferralCode();
+        if (pendingRef) {
+          triggerFeatherAnimation({
+            featherCount: 25,
+            durationMs: 3500,
+            label: '✨ +40 Magic Feathers (₹20 OFF) Credited! ✨'
+          });
+          setSuccessMsg(`Welcome, ${session.displayName || 'Valued Patron'}! 40 Magic Feathers (₹20 OFF) credited to your account!`);
+        } else {
+          setSuccessMsg(`Welcome, ${session.displayName || 'Valued Patron'}! Opening your dashboard...`);
+        }
         setTimeout(() => {
           triggerAuthCallback(session);
-        }, 1000);
+        }, 1200);
       }
       // If session is null (popup was closed/cancelled by user), do nothing cleanly without displaying any error banner
     } catch (err: any) {
@@ -110,11 +123,23 @@ export const AccountAuthBarrier: React.FC<AccountAuthBarrierProps> = ({
           return;
         }
 
-        const session = await signUpCustomer(email, password, fullName, phone);
-        setSuccessMsg(`Account created successfully! Welcome to Feat, ${fullName}.`);
+        const cleanRef = (referralCode || getPendingReferralCode() || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+        const session = await signUpCustomer(email, password, fullName, phone, cleanRef);
+        
+        if (cleanRef) {
+          triggerFeatherAnimation({
+            featherCount: 25,
+            durationMs: 3500,
+            label: '✨ +40 Magic Feathers (₹20 OFF) Credited! ✨'
+          });
+          setSuccessMsg(`Account created! You received 40 Magic Feathers (₹20 OFF) to use for discounts on the website!`);
+        } else {
+          setSuccessMsg(`Account created successfully! Welcome to Feat, ${fullName}.`);
+        }
+
         setTimeout(() => {
           triggerAuthCallback(session);
-        }, 1200);
+        }, 1300);
       } else if (mode === 'forgot') {
         if (!email.trim() || !email.includes('@')) {
           setError('Please enter your registered email address.');
@@ -346,6 +371,35 @@ export const AccountAuthBarrier: React.FC<AccountAuthBarrierProps> = ({
                     {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
                 </div>
+              </div>
+            )}
+
+            {/* Referral Code Field (Optional - Grants ₹20 Magic Feathers!) */}
+            {mode === 'signup' && (
+              <div className="bg-amber-50/70 border border-amber-200/80 rounded-2xl p-3 space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="flex items-center gap-1.5 text-xs font-bold text-amber-950">
+                    <Gift className="w-3.5 h-3.5 text-amber-600" />
+                    <span>Referral Code (Optional)</span>
+                  </label>
+                  <span className="text-[10px] font-black text-amber-700 bg-amber-100/90 border border-amber-300/60 px-2 py-0.5 rounded-full flex items-center gap-1">
+                    <Sparkles className="w-3 h-3 text-amber-600" />
+                    Get ₹20 Off
+                  </span>
+                </div>
+
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={referralCode}
+                    onChange={(e) => setReferralCode(e.target.value.toUpperCase())}
+                    placeholder="e.g. FRIEND20"
+                    className="w-full uppercase font-mono text-xs px-3 py-2 bg-white border border-amber-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold tracking-wider text-gray-900 placeholder:normal-case placeholder:font-sans placeholder:font-normal placeholder:tracking-normal"
+                  />
+                </div>
+                <p className="text-[10px] text-amber-800 leading-tight">
+                  🎁 Sign up using anyone's referral code to instantly receive <strong>40 Magic Feathers (₹20 discount)</strong> to spend on any order!
+                </p>
               </div>
             )}
 

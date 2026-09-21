@@ -139,7 +139,7 @@ export const OrderDetailsPage: React.FC<OrderDetailsPageProps> = ({
       if (isCod) {
         setCancelFeedback(`Order #${activeOrder.id} has been cancelled successfully. Shiprocket courier dispatch revoked. Since this was Cash on Delivery, no payment was collected.`);
       } else {
-        setCancelFeedback(`Order #${activeOrder.id} cancelled successfully. Automated refund of ₹${activeOrder.finalAmount.toLocaleString('en-IN')} initiated to your original payment method (${activeOrder.paymentMethod}).`);
+        setCancelFeedback(`Order #${activeOrder.id} cancelled successfully. Automated refund of ₹${(activeOrder.finalAmount ?? 0).toLocaleString('en-IN')} initiated to your original payment method (${activeOrder.paymentMethod}).`);
       }
     } catch (err: any) {
       alert(err.message || 'Unable to cancel order right now. Please connect with our support team.');
@@ -237,7 +237,7 @@ export const OrderDetailsPage: React.FC<OrderDetailsPageProps> = ({
                 <div className="text-left sm:text-right bg-white px-4 py-2 rounded-2xl border border-emerald-200 shadow-2xs">
                   <span className="text-[10px] uppercase font-bold text-gray-400 block tracking-wider">Refund Amount</span>
                   <span className="text-lg font-black text-emerald-800 font-serif">
-                    ₹{(activeOrder.refundAmount || activeOrder.finalAmount).toLocaleString('en-IN')}
+                    ₹{(activeOrder.refundAmount || activeOrder.finalAmount || 0).toLocaleString('en-IN')}
                   </span>
                 </div>
               )}
@@ -321,7 +321,7 @@ export const OrderDetailsPage: React.FC<OrderDetailsPageProps> = ({
                   <div className="inline-block bg-white px-3.5 py-1.5 rounded-xl border border-pink-200 shadow-2xs">
                     <span className="text-[11px] text-gray-500 block font-medium">Grand Total</span>
                     <span className="text-base font-black text-gray-900 font-serif">
-                      Total: ₹{activeOrder.finalAmount.toLocaleString('en-IN')}
+                      Total: ₹{(activeOrder.finalAmount ?? 0).toLocaleString('en-IN')}
                     </span>
                   </div>
                 </div>
@@ -428,7 +428,7 @@ export const OrderDetailsPage: React.FC<OrderDetailsPageProps> = ({
 
                       <div className="text-left sm:text-right border-t sm:border-t-0 pt-2 sm:pt-0 border-pink-100 flex sm:flex-col items-center sm:items-end justify-between shrink-0">
                         <span className="text-sm font-black text-gray-900 font-serif">
-                          ₹{(item.product.price * item.quantity).toLocaleString('en-IN')}
+                          ₹{(((item.product?.price ?? 0) * (item.quantity || 1))).toLocaleString('en-IN')}
                         </span>
                         <div className="flex items-center gap-1 text-[10px] font-bold text-pink-700 group-hover:underline mt-1">
                           <span>Details</span>
@@ -444,18 +444,18 @@ export const OrderDetailsPage: React.FC<OrderDetailsPageProps> = ({
               <div className="mt-4 pt-4 border-t border-pink-100 space-y-2 text-xs text-gray-600">
                 <div className="flex justify-between">
                   <span>Items MRP Total</span>
-                  <span className="font-semibold">₹{(activeOrder.totalMrp || activeOrder.finalAmount).toLocaleString('en-IN')}</span>
+                  <span className="font-semibold">₹{(activeOrder.totalMrp || activeOrder.finalAmount || 0).toLocaleString('en-IN')}</span>
                 </div>
-                {activeOrder.discountAmount > 0 && (
+                {(activeOrder.discountAmount ?? 0) > 0 && (
                   <div className="flex justify-between text-emerald-700 font-semibold">
                     <span>Catalog Product Discount</span>
-                    <span>-₹{activeOrder.discountAmount.toLocaleString('en-IN')}</span>
+                    <span>-₹{(activeOrder.discountAmount ?? 0).toLocaleString('en-IN')}</span>
                   </div>
                 )}
-                {activeOrder.couponDiscount > 0 && (
+                {(activeOrder.couponDiscount ?? 0) > 0 && (
                   <div className="flex justify-between text-emerald-700 font-semibold">
                     <span>Promo Code ({activeOrder.promoCodeUsed || 'Applied'})</span>
-                    <span>-₹{activeOrder.couponDiscount.toLocaleString('en-IN')}</span>
+                    <span>-₹{(activeOrder.couponDiscount ?? 0).toLocaleString('en-IN')}</span>
                   </div>
                 )}
                 <div className="flex justify-between">
@@ -464,7 +464,7 @@ export const OrderDetailsPage: React.FC<OrderDetailsPageProps> = ({
                 </div>
                 <div className="flex justify-between border-t border-pink-100 pt-2 text-sm font-black text-pink-950 font-serif">
                   <span>Grand Total Paid</span>
-                  <span>₹{activeOrder.finalAmount.toLocaleString('en-IN')}</span>
+                  <span>₹{(activeOrder.finalAmount ?? 0).toLocaleString('en-IN')}</span>
                 </div>
               </div>
             </div>
@@ -668,7 +668,7 @@ export const OrderDetailsPage: React.FC<OrderDetailsPageProps> = ({
                   <span>100% Money-Back Automated Refund</span>
                 </p>
                 <p>
-                  Cancelling will immediately recall the Shiprocket courier dispatch and initiate an automated 100% full refund of <strong>₹{activeOrder.finalAmount.toLocaleString('en-IN')}</strong> directly to your original payment method ({activeOrder.paymentMethod}). Most UPI & bank transfers credit within 5-7 business days.
+                  Cancelling will immediately recall the Shiprocket courier dispatch and initiate an automated 100% full refund of <strong>₹{(activeOrder.finalAmount ?? 0).toLocaleString('en-IN')}</strong> directly to your original payment method ({activeOrder.paymentMethod}). Most UPI & bank transfers credit within 5-7 business days.
                 </p>
               </div>
             )}

@@ -11,6 +11,7 @@ import {
 } from '../firebase';
 import { doc, setDoc } from 'firebase/firestore';
 import { isSilentAuthCancellation, getCleanAuthErrorMessage } from '../utils/authErrors';
+import { getPendingReferralCode, clearPendingReferralCode, linkReferralCode } from './referralService';
 
 export interface CustomerSession {
   uid: string;
@@ -128,11 +129,13 @@ export const signUpCustomer = async (
   email: string, 
   pass: string, 
   fullName: string, 
-  phone?: string
+  phone?: string,
+  referralCode?: string
 ): Promise<CustomerSession> => {
   const cleanEmail = email.trim().toLowerCase();
   const cleanName = fullName.trim();
   const cleanPhone = phone?.trim() || '';
+  const cleanRef = (referralCode || getPendingReferralCode() || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
 
   if (!cleanEmail || !cleanEmail.includes('@')) {
     throw new Error('Please enter a valid email address.');
@@ -162,6 +165,7 @@ export const signUpCustomer = async (
             email: cleanEmail,
             displayName: cleanName,
             phone: cleanPhone,
+            referredByCode: cleanRef || null,
             createdAt: new Date().toISOString(),
             provider: 'password'
           }, { merge: true });
@@ -176,12 +180,23 @@ export const signUpCustomer = async (
       };
       saveCustomerSession(session);
 
-      // Sync user to backend as well so server knows about the account
+      // Sync user to backend as well so server knows about the account and referral
       fetch('/api/auth/sync-user', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uid: fbUser.uid, email: cleanEmail, displayName: cleanName, phone: cleanPhone })
+        body: JSON.stringify({ 
+          uid: fbUser.uid, 
+          email: cleanEmail, 
+          displayName: cleanName, 
+          phone: cleanPhone,
+          referredByCode: cleanRef || undefined
+        })
       }).catch(() => {});
+
+      // If user signed up with referral code, credit ₹20 worth of Magic Feathers (40 feathers)
+      if (cleanRef) {
+        linkReferralCode(fbUser.uid, cleanEmail, cleanRef).catch(() => {});
+      }
 
       return session;
     } catch (fbErr: any) {
@@ -204,7 +219,8 @@ export const signUpCustomer = async (
         email: cleanEmail,
         password: pass,
         displayName: cleanName,
-        phone: cleanPhone
+        phone: cleanPhone,
+        referralCode: cleanRef || undefined
       })
     });
     const data = await res.json();
@@ -219,6 +235,11 @@ export const signUpCustomer = async (
       token: data.token
     };
     saveCustomerSession(session);
+
+    if (cleanRef) {
+      linkReferralCode(session.uid, session.email, cleanRef).catch(() => {});
+    }
+
     return session;
   } catch (err: any) {
     throw new Error(err.message || 'Account creation failed. Please try again.');
@@ -232,6 +253,7 @@ export const signInCustomerWithGoogle = async (): Promise<CustomerSession | null
   try {
     const fbUser = await signInWithGoogle();
     if (fbUser) {
+      const cleanRef = (getPendingReferralCode() || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
       const session: CustomerSession = {
         uid: fbUser.uid,
         email: fbUser.email || '',
@@ -240,7 +262,7 @@ export const signInCustomerWithGoogle = async (): Promise<CustomerSession | null
       };
       saveCustomerSession(session);
 
-      // Sync to backend
+      // Sync to backend with referral code if pending
       fetch('/api/auth/sync-user', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -248,9 +270,14 @@ export const signInCustomerWithGoogle = async (): Promise<CustomerSession | null
           uid: fbUser.uid,
           email: fbUser.email,
           displayName: fbUser.displayName,
-          phone: fbUser.phoneNumber
+          phone: fbUser.phoneNumber,
+          referredByCode: cleanRef || undefined
         })
       }).catch(() => {});
+
+      if (cleanRef) {
+        linkReferralCode(fbUser.uid, fbUser.email || '', cleanRef).catch(() => {});
+      }
 
       return session;
     }

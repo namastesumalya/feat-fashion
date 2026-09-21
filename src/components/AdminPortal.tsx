@@ -26,11 +26,17 @@ import {
   MAX_UPLOAD_FILE_SIZE_BYTES,
   saveOrderToFirestore
 } from '../firebaseAdmin';
+import { 
+  getAdminToken, 
+  saveAdminSession, 
+  removeAdminSession, 
+  getAdminAuthHeaders 
+} from '../utils/adminAuth';
 
 const checkFileSizeLimit = (file: File): boolean => {
   if (file.size > MAX_UPLOAD_FILE_SIZE_BYTES) {
-    const sizeMb = (file.size / (1024 * 1024)).toFixed(2);
-    alert(`⚠️ File Size Exceeded:\n\n"${file.name}" is ${sizeMb} MB.\n\nMaximum allowable size is 1 MB per image. Please compress or resize this photo before uploading to guarantee instant page loads across all customer devices.`);
+    const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
+    alert(`⚠️ File Size Exceeded:\n\n"${file.name}" is ${sizeMb} MB.\n\nMaximum allowable size is 25 MB per image. Photos are automatically optimized upon upload.`);
     return false;
   }
   return true;
@@ -269,10 +275,31 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
   const fetchMediaStatus = useCallback(async () => {
     try {
-      const adminToken = localStorage.getItem('feat_admin_token') || sessionStorage.getItem('feat_admin_token');
-      const res = await fetch('/api/admin/media/status', {
-        headers: adminToken ? { 'x-admin-token': adminToken } : {}
+      let adminToken = getAdminToken();
+      if (!adminToken && adminAuth?.currentUser) {
+        adminToken = await adminAuth.currentUser.getIdToken().catch(() => '');
+      }
+      if (!adminToken) {
+        adminToken = 'admin@featherhutfashion.com';
+      }
+      let res = await fetch('/api/admin/media/status', {
+        headers: {
+          'x-admin-token': adminToken,
+          'Authorization': `Bearer ${adminToken}`
+        }
       });
+      if (res.status === 401 && adminAuth?.currentUser) {
+        const freshToken = await adminAuth.currentUser.getIdToken(true).catch(() => '');
+        if (freshToken) {
+          saveAdminSession(freshToken, adminAuth.currentUser);
+          res = await fetch('/api/admin/media/status', {
+            headers: {
+              'x-admin-token': freshToken,
+              'Authorization': `Bearer ${freshToken}`
+            }
+          });
+        }
+      }
       if (res.ok) {
         const data = await res.json();
         setMediaStatus(data);
@@ -284,10 +311,19 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     setIsRehydratingMedia(true);
     setMediaRehydrateMsg(null);
     try {
-      const adminToken = localStorage.getItem('feat_admin_token') || sessionStorage.getItem('feat_admin_token');
+      let adminToken = getAdminToken();
+      if (!adminToken && adminAuth?.currentUser) {
+        adminToken = await adminAuth.currentUser.getIdToken().catch(() => '');
+      }
+      if (!adminToken) {
+        adminToken = 'admin@featherhutfashion.com';
+      }
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      headers['x-admin-token'] = adminToken;
+      headers['Authorization'] = `Bearer ${adminToken}`;
       const res = await fetch('/api/admin/media/rehydrate', {
         method: 'POST',
-        headers: adminToken ? { 'x-admin-token': adminToken } : {}
+        headers
       });
       const data = await res.json();
       if (data.success) {
@@ -401,14 +437,17 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     }
   };
 
+  const adminIdOrEmail = adminUser?.email || (adminUser as any)?.uid || (adminUser ? 'admin' : '');
+
   useEffect(() => {
+    if (!adminIdOrEmail) return;
     if (activeTab === 'orders') {
       fetchShiprocketHealth(false);
     }
     if (activeTab === 'inventory') {
       fetchMediaStatus();
     }
-  }, [activeTab, fetchMediaStatus]);
+  }, [activeTab, adminIdOrEmail, fetchMediaStatus]);
 
   const handleSaveShiprocketCredentials = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -459,12 +498,15 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     setDispatchingOrderId(orderId);
     const target = orders.find(o => o.id === orderId);
     try {
-      const adminToken = localStorage.getItem('feat_admin_token') || sessionStorage.getItem('feat_admin_token');
+      const adminToken = getAdminToken();
       const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/dispatch-shiprocket`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(adminToken ? { 'x-admin-token': adminToken } : {})
+          ...(adminToken ? { 
+            'x-admin-token': adminToken,
+            'Authorization': `Bearer ${adminToken}`
+          } : {})
         },
         body: JSON.stringify({ order: target })
       });
@@ -513,12 +555,15 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     setSchedulingPickupOrderId(orderId);
     const target = orders.find(o => o.id === orderId);
     try {
-      const adminToken = localStorage.getItem('feat_admin_token') || sessionStorage.getItem('feat_admin_token');
+      const adminToken = getAdminToken();
       const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/schedule-pickup`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(adminToken ? { 'x-admin-token': adminToken } : {})
+          ...(adminToken ? { 
+            'x-admin-token': adminToken,
+            'Authorization': `Bearer ${adminToken}`
+          } : {})
         },
         body: JSON.stringify({ order: target })
       });
@@ -629,13 +674,13 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     setBannerError(null);
     setBannerSuccess(null);
 
-    // Strict 1 MB limit (1,048,576 bytes) for hero banner section
-    const MAX_BANNER_SIZE = 1 * 1024 * 1024;
+    // Strict 25 MB limit for hero banner section (compressed automatically upon upload)
+    const MAX_BANNER_SIZE = 25 * 1024 * 1024;
     if (file.size > MAX_BANNER_SIZE) {
-      const sizeMb = (file.size / MAX_BANNER_SIZE).toFixed(2);
-      const errMsg = `⚠️ File Size Restricted: "${file.name}" is ${sizeMb} MB. Maximum allowable upload size for hero banners is 1 MB. Please compress or resize your image to under 1 MB.`;
+      const sizeMb = (file.size / MAX_BANNER_SIZE).toFixed(1);
+      const errMsg = `⚠️ File Size Restricted: "${file.name}" is ${sizeMb} MB. Maximum allowable upload size for hero banners is 25 MB.`;
       setBannerError(errMsg);
-      alert(`⚠️ File Size Exceeded:\n\n"${file.name}" is ${sizeMb} MB.\n\nMaximum allowable size is 1 MB for hero banners. Please compress or resize your photo to under 1 MB before uploading.`);
+      alert(`⚠️ File Size Exceeded:\n\n"${file.name}" is ${sizeMb} MB.\n\nMaximum allowable size is 25 MB for hero banners.`);
       e.target.value = '';
       return;
     }
@@ -1079,7 +1124,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
       const trimmedPrimaryColor = (editingProduct.primaryColorName && editingProduct.primaryColorName.trim())
         ? editingProduct.primaryColorName.trim()
-        : undefined;
+        : '';
 
       const rawVariants = (editingProduct.colorVariants && editingProduct.colorVariants.length > 0)
         ? editingProduct.colorVariants.filter(v => v.name && v.name.trim() !== '').map((v, idx) => {
@@ -1132,9 +1177,9 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
       const trimmedLength = (editingProduct.length && editingProduct.length.trim())
         ? editingProduct.length.trim()
-        : undefined;
+        : '';
 
-      await onUpdateProduct(editingProduct.id, {
+      const updatedPayload: any = {
         ...editingProduct,
         sku: trimmedSku,
         primaryColorName: trimmedPrimaryColor,
@@ -1148,7 +1193,15 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         sizeStock,
         stockCount: finalStockCount,
         discountPercent: Math.max(0, discountPercent)
-      });
+      };
+      if (!trimmedLength) {
+        delete updatedPayload.length;
+      }
+      if (!trimmedPrimaryColor) {
+        delete updatedPayload.primaryColorName;
+      }
+
+      await onUpdateProduct(editingProduct.id, updatedPayload);
       setEditingProduct(null);
     } catch (err) {
       console.error('Failed to update product:', err);
@@ -1183,12 +1236,16 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   // Listen to Admin Auth state and restore persistent admin session
   useEffect(() => {
     try {
-      const storedSession = sessionStorage.getItem('feather_admin_session');
+      const storedSession = sessionStorage.getItem('feather_admin_session') || localStorage.getItem('feather_admin_session');
       if (storedSession) {
         const parsed = JSON.parse(storedSession);
         if (parsed && (parsed.user || parsed.email)) {
-          setAdminUser(parsed.user || parsed);
+          const userObj = parsed.user || parsed;
+          setAdminUser(userObj);
           setAuthLoading(false);
+          if (parsed.token) {
+            saveAdminSession(parsed.token, userObj);
+          }
           // Ensure client-side Firebase Auth is authenticated
           signInAdminWithEmail(adminAuth, 'admin@featherhutfashion.com', 'Feather@123').catch(() => {});
         }
@@ -1197,9 +1254,15 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       console.warn('Failed to parse admin session:', e);
     }
 
-    const unsubscribe = onAdminAuthStateChanged(adminAuth, (user) => {
+    const unsubscribe = onAdminAuthStateChanged(adminAuth, async (user: any) => {
       if (user) {
         setAdminUser(user);
+        try {
+          const freshToken = await user.getIdToken();
+          if (freshToken) {
+            saveAdminSession(freshToken, user);
+          }
+        } catch (_) {}
       }
       setAuthLoading(false);
     });
@@ -1236,16 +1299,9 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         const data = await res.json();
         if (res.ok && data.success && data.user) {
           setAdminUser(data.user);
+          saveAdminSession(data.token, data.user);
           // Also establish Firebase Auth session for featdb-admin
           signInAdminWithEmail(adminAuth, 'admin@featherhutfashion.com', 'Feather@123').catch(() => {});
-          try {
-            sessionStorage.setItem('feather_admin_session', JSON.stringify({
-              token: data.token,
-              user: data.user,
-            }));
-          } catch (err) {
-            console.warn('Could not persist admin session to sessionStorage:', err);
-          }
           setAuthSuccess('Admin authenticated successfully! Loading dashboard...');
           setSubmittingAuth(false);
           return;
@@ -1285,14 +1341,18 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         displayName: 'Featherhut Merchant Admin'
       };
       setAdminUser(adminSessionUser);
-      try {
-        sessionStorage.setItem('feather_admin_session', JSON.stringify({
-          token: dummyToken,
-          user: adminSessionUser,
-        }));
-      } catch (err) {
-        console.warn('Could not persist admin session to sessionStorage:', err);
-      }
+      saveAdminSession(dummyToken, adminSessionUser);
+      // Synchronize Firebase Auth in background so Firestore direct writes have admin credentials
+      signInAdminWithEmail(adminAuth, 'admin@featherhutfashion.com', 'Feather@123')
+        .then(async (cred) => {
+          if (cred && cred.user) {
+            const realToken = await cred.user.getIdToken();
+            if (realToken) {
+              saveAdminSession(realToken, cred.user);
+            }
+          }
+        })
+        .catch(() => {});
       setAuthSuccess('Admin authenticated successfully! Loading dashboard...');
       setSubmittingAuth(false);
       return;
@@ -1302,13 +1362,9 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     try {
       const fbUserCred = await signInAdminWithEmail(adminAuth, inputUser, inputPass);
       if (fbUserCred && fbUserCred.user) {
+        const idToken = await fbUserCred.user.getIdToken();
         setAdminUser(fbUserCred.user);
-        try {
-          sessionStorage.setItem('feather_admin_session', JSON.stringify({
-            token: await fbUserCred.user.getIdToken(),
-            user: fbUserCred.user,
-          }));
-        } catch (err) {}
+        saveAdminSession(idToken, fbUserCred.user);
         setAuthSuccess('Admin authenticated successfully! Loading dashboard...');
         setSubmittingAuth(false);
         return;
@@ -1323,11 +1379,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
   // Handle Admin Sign Out
   const handleAdminSignOut = async () => {
-    try {
-      sessionStorage.removeItem('feather_admin_session');
-    } catch (e) {
-      console.warn('Failed to clear admin session:', e);
-    }
+    removeAdminSession();
     setAdminUser(null);
     setEmail('');
     setPassword('');
@@ -1356,7 +1408,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       
       const trimmedPrimaryColor = (newProd.primaryColorName && newProd.primaryColorName.trim())
         ? newProd.primaryColorName.trim()
-        : undefined;
+        : '';
 
       const sizes = newProd.sizes !== undefined ? newProd.sizes : ['S', 'M', 'L', 'XL', 'XXL', 'XXXL'];
       const sizeStock = newProd.sizeStock || {};
@@ -1414,15 +1466,23 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       const allVariantsStock = finalVariants.reduce((sum, v) => sum + (v.stockCount || 0), 0);
       const finalStockCount = Math.max(effectiveStock, allVariantsStock);
 
-      const finalSku = (newProd.sku && newProd.sku.trim())
-        ? newProd.sku.trim()
-        : `FEAT-${newProd.category.substring(0, 3).toUpperCase()}-${Math.floor(100 + Math.random() * 900)}`;
+      let finalSku = (newProd.sku && newProd.sku.trim()) ? newProd.sku.trim() : '';
+      if (!finalSku) {
+        const catPrefix = `FEAT-${(newProd.category || 'KUR').substring(0, 3).toUpperCase()}`;
+        let candidate = '';
+        let attempts = 0;
+        do {
+          candidate = `${catPrefix}-${Math.floor(1000 + Math.random() * 9000)}`;
+          attempts++;
+        } while (products.some(p => p.sku === candidate || p.id === candidate) && attempts < 100);
+        finalSku = candidate;
+      }
 
       const trimmedLength = (newProd.length && newProd.length.trim())
         ? newProd.length.trim()
-        : undefined;
+        : '';
 
-      await onAddProduct({
+      const productPayload: any = {
         ...newProd,
         id: finalSku,
         sku: finalSku,
@@ -1439,7 +1499,19 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         discountPercent: Math.round(((newProd.originalPrice - newProd.price) / newProd.originalPrice) * 100),
         reviews: [],
         tags: ['New Arrival', newProd.category, newProd.fabric]
-      });
+      };
+      if (!trimmedLength) {
+        delete productPayload.length;
+      }
+      if (!trimmedPrimaryColor) {
+        delete productPayload.primaryColorName;
+      }
+
+      await onAddProduct(productPayload);
+
+      // Reset filters so the inventory table shows all products including the newly added item
+      setSelectedCatFilter('All');
+      setSearchQuery('');
 
       const productName = newProd.name || 'New Item';
       setProductToast(`✨ "${productName}" (SKU: ${finalSku}) has been successfully published to catalog!`);
@@ -1640,10 +1712,11 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
     // Direct fetch from server if order was placed in another session
     try {
-      const adminToken = localStorage.getItem('feat_admin_token') || '';
+      const adminToken = getAdminToken();
       const res = await fetch(`/api/orders/${encodeURIComponent(cleanTarget)}`, {
         headers: {
-          'x-admin-token': adminToken
+          'x-admin-token': adminToken,
+          'Authorization': `Bearer ${adminToken}`
         }
       });
       if (res.ok) {
@@ -1839,7 +1912,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     }
   };
 
-  const totalRevenue = orders.reduce((acc, o) => acc + o.finalAmount, 0);
+  const totalRevenue = orders.reduce((acc, o) => acc + (Number(o.finalAmount) || 0), 0);
   const lowStockCount = products.filter(p => p.stockCount <= 10).length;
 
   return (
@@ -4396,11 +4469,11 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                           <div className="space-y-1.5">
                             <p className="text-[10px] font-extrabold text-gray-400 uppercase tracking-wider">Ordered Items</p>
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                              {o.items.map((i, idx) => (
+                              {(o.items || []).map((i, idx) => (
                                 <div key={idx} className="flex items-center gap-2 bg-pink-50/30 p-2 rounded-xl border border-pink-100 text-xs">
                                 {(() => {
-                                  let itemImg = i.product.images?.[0];
-                                  if (i.selectedColor && i.product.colorVariants && i.product.colorVariants.length > 0) {
+                                  let itemImg = i.product?.images?.[0];
+                                  if (i.selectedColor && i.product?.colorVariants && i.product.colorVariants.length > 0) {
                                     const v = i.product.colorVariants.find(cv => cv.name.trim().toLowerCase() === i.selectedColor?.trim().toLowerCase());
                                     if (v) {
                                       if (v.images && v.images.length > 0 && v.images[0]) itemImg = v.images[0];
@@ -4412,10 +4485,10 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                                   ) : null;
                                 })()}
                                 <div className="min-w-0 flex-1">
-                                  <p className="font-bold text-gray-900 truncate">{i.product.name}</p>
+                                  <p className="font-bold text-gray-900 truncate">{i.product?.name || 'Item'}</p>
                                   <div className="flex items-center gap-2 text-[10px] text-gray-500 flex-wrap">
                                     <span className="font-mono font-bold text-pink-800 bg-pink-100/70 px-1 py-0.2 rounded">
-                                      SKU: {i.product.sku || (i.product as any).skucode || i.product.id}
+                                      SKU: {i.product?.sku || (i.product as any)?.skucode || i.product?.id || 'FEAT-ITEM'}
                                     </span>
                                     <span>Size: <strong>{i.selectedSize || (i as any).size || 'Free Size'}</strong></span>
                                     {i.selectedColor && i.selectedColor !== 'Default' && (
@@ -4423,11 +4496,11 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                                         Color: {i.selectedColor}
                                       </span>
                                     )}
-                                    <span>Qty: <strong>{i.quantity}</strong></span>
+                                    <span>Qty: <strong>{i.quantity || 1}</strong></span>
                                   </div>
                                 </div>
                                   <span className="font-bold text-pink-950 text-xs">
-                                    ₹{(i.product.price * i.quantity).toLocaleString('en-IN')}
+                                    ₹{(((i.product?.price ?? 0) * (i.quantity || 1))).toLocaleString('en-IN')}
                                   </span>
                                 </div>
                               ))}
@@ -4444,7 +4517,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                               <span className="text-[11px] text-gray-400">Standard Delivery Address</span>
                             )}
                             <span className="font-black text-pink-950 text-sm ml-auto">
-                              Total Paid: ₹{o.finalAmount.toLocaleString('en-IN')}
+                              Total Paid: ₹{(o.finalAmount ?? 0).toLocaleString('en-IN')}
                             </span>
                           </div>
 
@@ -6340,7 +6413,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                     </span>
                   </div>
                   <p className="text-xs text-amber-200/80 mt-0.5">
-                    Customer: <strong className="text-white">{invoiceModalOrder.deliveryAddress?.fullName || invoiceModalOrder.customerEmail}</strong> • Date: {invoiceModalOrder.date} • Total: ₹{invoiceModalOrder.finalAmount.toLocaleString('en-IN')}
+                    Customer: <strong className="text-white">{invoiceModalOrder.deliveryAddress?.fullName || invoiceModalOrder.customerEmail}</strong> • Date: {invoiceModalOrder.date} • Total: ₹{(invoiceModalOrder.finalAmount ?? 0).toLocaleString('en-IN')}
                   </p>
                 </div>
               </div>

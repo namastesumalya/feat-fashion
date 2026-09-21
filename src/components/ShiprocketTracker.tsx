@@ -361,7 +361,7 @@ export const ShiprocketTracker: React.FC<ShiprocketTrackerProps> = ({
             </div>
             <p className="text-[11px] text-rose-900/80">
               {order.cancellationReason || 'Cancelled at customer request'}. Courier pickup has been cancelled with Shiprocket.
-              Refund of <strong>₹{order.finalAmount.toLocaleString('en-IN')}</strong> has been processed to your {order.paymentMethod} account.
+              Refund of <strong>₹{(order.finalAmount ?? 0).toLocaleString('en-IN')}</strong> has been processed to your {order.paymentMethod} account.
             </p>
           </div>
         )}
